@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Request #{{ log.id }} - Switchboard{% endblock %}
+{% block content %}
+<p><a href="/activity">&larr; Back to activity</a></p>
+<h2>Request #{{ log.id }}</h2>
+<div class="card">
+  <table>
+    <tr><th>Time (UTC)</th><td>{{ log.created_at }}</td></tr>
+    <tr><th>Requested model</th><td>{{ log.requested_model }}</td></tr>
+    <tr><th>Upstream used</th><td>{{ log.upstream or "-" }}{% if log.upstream_model %} (model: {{ log.upstream_model }}){% endif %}</td></tr>
+    <tr><th>Status</th><td>{{ log.status_code or "no response" }}</td></tr>
+    <tr><th>Streaming</th><td>{{ log.stream }}</td></tr>
+    <tr><th>Latency</th><td>{% if log.latency_ms is not none %}{{ log.latency_ms }} ms{% else %}-{% endif %}</td></tr>
+    <tr><th>Tokens (prompt/completion/total)</th><td>{{ log.prompt_tokens or "-" }} / {{ log.completion_tokens or "-" }} / {{ log.total_tokens or "-" }}</td></tr>
+    {% if log.error %}<tr><th>Error</th><td class="error">{{ log.error }}</td></tr>{% endif %}
+  </table>
+</div>
+
+<div class="card">
+  <h3>Request</h3>
+  <p class="muted">{{ log.request_method }} {{ log.request_path }}</p>
+  <h4>Headers</h4>
+  <pre>{{ log.request_headers | pretty_json }}</pre>
+  <h4>Body</h4>
+  <pre>{{ log.request_body | pretty_json }}</pre>
+</div>
+
+<div class="card">
+  <h3>Response</h3>
+  {% if log.response_headers %}<h4>Headers</h4><pre>{{ log.response_headers | pretty_json }}</pre>{% endif %}
+  <h4>Body</h4>
+  <pre>{{ log.response_body | pretty_json }}</pre>
+</div>
+{% endblock %}

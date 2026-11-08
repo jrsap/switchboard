@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Organizations - Switchboard{% endblock %}
+{% block content %}
+<h2>Your organizations</h2>
+<div class="card">
+  <table>
+    <tr><th>Organization</th><th>Your role</th><th></th></tr>
+    {% for m, org in memberships %}
+    <tr>
+      <td>{{ org.name }}</td>
+      <td>{{ m.role }}</td>
+      <td><a href="/orgs/{{ m.organization_id }}">open</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

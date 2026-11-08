@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}{{ org.name }} - Switchboard{% endblock %}
+{% block content %}
+<p><a href="/orgs">&larr; Back to organizations</a></p>
+<h2>{{ org.name }}</h2>
+{% if saved %}<p class="ok">Settings saved.</p>{% endif %}
+
+<div class="card">
+  <h3>Members</h3>
+  <table>
+    <tr><th>User</th><th>Role</th></tr>
+    {% for m, u in members %}
+    <tr><td>{{ u.username }}</td><td>{{ m.role }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h3>Quotas and allowlist</h3>
+  {% if is_admin %}
+  <form method="post" action="/orgs/{{ org.id }}/settings">
+    <label for="max_requests_per_day">Max requests per day (empty = unlimited)</label>
+    <input type="text" id="max_requests_per_day" name="max_requests_per_day" value="{{ org.max_requests_per_day if org.max_requests_per_day is not none else '' }}">
+    <label for="max_prompt_tokens_per_day">Max prompt tokens per day (empty = unlimited)</label>
+    <input type="text" id="max_prompt_tokens_per_day" name="max_prompt_tokens_per_day" value="{{ org.max_prompt_tokens_per_day if org.max_prompt_tokens_per_day is not none else '' }}">
+    <label for="max_completion_tokens_per_day">Max completion tokens per day (empty = unlimited)</label>
+    <input type="text" id="max_completion_tokens_per_day" name="max_completion_tokens_per_day" value="{{ org.max_completion_tokens_per_day if org.max_completion_tokens_per_day is not none else '' }}">
+    <label for="allowed_models">Allowed models/aliases, comma separated (empty = all allowed)</label>
+    <input type="text" id="allowed_models" name="allowed_models" value="{{ allowed }}">
+    <div style="margin-top: 16px;"><button type="submit">Save</button></div>
+  </form>
+  {% else %}
+  <p class="muted">Only organization admins can change these settings.</p>
+  <table>
+    <tr><th>Max requests per day</th><td>{{ org.max_requests_per_day if org.max_requests_per_day is not none else 'unlimited' }}</td></tr>
+    <tr><th>Max prompt tokens per day</th><td>{{ org.max_prompt_tokens_per_day if org.max_prompt_tokens_per_day is not none else 'unlimited' }}</td></tr>
+    <tr><th>Max completion tokens per day</th><td>{{ org.max_completion_tokens_per_day if org.max_completion_tokens_per_day is not none else 'unlimited' }}</td></tr>
+    <tr><th>Allowed models/aliases</th><td>{{ allowed if allowed else 'all' }}</td></tr>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}
