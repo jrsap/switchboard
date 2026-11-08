@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .config import SwitchboardConfig
 from .db import utcnow
+from .health import maybe_refresh_stale
 from .models import ApiKey, Organization, RequestLog
 from .policy import allowlist_error, quota_error
 from .proxy import extract_usage_json, extract_usage_sse, try_targets
@@ -92,6 +93,8 @@ async def chat_completions(
     targets = resolve_targets(config, requested_model if isinstance(requested_model, str) else None)
     if targets is None:
         raise HTTPException(status_code=400, detail=f"model '{requested_model}' is not available on this switchboard")
+
+    maybe_refresh_stale(request.app, config, targets)
 
     org = db.get(Organization, key.organization_id)
     err = allowlist_error(org, requested_model)

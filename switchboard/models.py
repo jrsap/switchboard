@@ -64,6 +64,19 @@ class ApiKey(Base):
     requests: Mapped[list["RequestLog"]] = relationship(back_populates="api_key")
 
 
+class UpstreamStatus(Base):
+    __tablename__ = "upstream_status"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    upstream: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    base_url: Mapped[str] = mapped_column(String(500))
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    models: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+
 class RequestLog(Base):
     __tablename__ = "request_logs"
 

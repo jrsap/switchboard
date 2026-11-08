@@ -6,7 +6,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 
-from .models import Membership, Organization, RequestLog, User
+from . import health
+from .models import Membership, Organization, RequestLog, UpstreamStatus, User
+from .routing import resolve_targets
 from .security import create_session_token, verify_password, verify_session_token
 
 router = APIRouter()
@@ -127,6 +129,82 @@ def activity_detail(request: Request, log_id: int):
     finally:
         db.close()
     return templates.TemplateResponse(request, "activity_detail.html", {"user": user, "log": log})
+
+
+@router.get("/status", response_class=HTMLResponse)
+def status_page(request: Request, refreshed: int = 0):
+    user = user_or_redirect(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    config = request.app.state.config
+    db = request.app.state.session_factory()
+    try:
+        rows = db.execute(select(UpstreamStatus).order_by(UpstreamStatus.upstream)).scalars().all()
+    finally:
+        db.close()
+    statuses = {row.upstream: row for row in rows}
+
+    upstream_views = []
+    for name, upstream in sorted(config.upstreams.items()):
+        row = statuses.get(name)
+        upstream_views.append(
+            {
+                "name": name,
+                "base_url": upstream.base_url,
+                "status": row,
+                "model_count": len(row.models) if row and row.ok and row.models else 0,
+            }
+        )
+
+    model_views = []
+    for name in config.known_model_names():
+        targets = resolve_targets(config, name) or []
+        target_views = []
+        for target in targets:
+            row = statuses.get(target.upstream)
+            listed = None
+            caps: dict = {}
+            if row is not None and row.ok and row.models:
+                match = next((m for m in row.models if m.get("id") == target.model), None)
+                listed = match is not None
+                if match is not None:
+                    caps = match
+            target_views.append(
+                {
+                    "upstream": target.upstream,
+                    "upstream_model": target.model,
+                    "status": row,
+                    "listed": listed,
+                    "caps": caps,
+                }
+            )
+        model_views.append(
+            {"name": name, "is_alias": name in config.aliases, "targets": target_views}
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "status.html",
+        {
+            "user": user,
+            "upstreams": upstream_views,
+            "models": model_views,
+            "refreshed": refreshed,
+        },
+    )
+
+
+@router.post("/status/refresh")
+def refresh_status(request: Request):
+    user = user_or_redirect(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    health.poll_all(
+        request.app.state.session_factory,
+        request.app.state.config,
+        request.app.state.settings.health_poll_timeout_seconds,
+    )
+    return RedirectResponse("/status?refreshed=1")
 
 
 @router.get("/orgs", response_class=HTMLResponse)

@@ -15,6 +15,39 @@ from switchboard.settings import Settings
 
 def make_stub_server(behavior: str):
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/v1/models":
+                self._respond(404, {"error": "not found"})
+                return
+            if behavior == "flaky":
+                self._respond(500, {"error": {"message": "upstream exploded"}})
+                return
+            self._respond(
+                200,
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "good-model",
+                            "object": "model",
+                            "created": 1700000000,
+                            "owned_by": "stub",
+                            "max_model_len": 128000,
+                            "supported_modalities": ["text", "image"],
+                            "supported_parameters": ["temperature", "tools"],
+                        },
+                        {
+                            "id": "other-model",
+                            "object": "model",
+                            "created": 1700000001,
+                            "owned_by": "stub",
+                            "max_context_length": 32768,
+                            "modalities": ["text"],
+                        },
+                    ],
+                },
+            )
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length)

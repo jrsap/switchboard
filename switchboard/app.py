@@ -1,6 +1,9 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from . import health
 from .api import router as api_router
 from .config import SwitchboardConfig, load_config
 from .db import Base, make_engine, make_session_factory
@@ -15,7 +18,15 @@ def create_app(settings: Settings | None = None, config: SwitchboardConfig | Non
     session_factory = make_session_factory(engine)
     cfg = config if config is not None else load_config(settings.config_path)
 
-    app = FastAPI(title="Switchboard")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        stop, thread = health.start_periodic_poller(app)
+        app.state.health_stop = stop
+        app.state.health_thread = thread
+        yield
+        stop.set()
+
+    app = FastAPI(title="Switchboard", lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory

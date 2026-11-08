@@ -11,6 +11,10 @@ succeeds (failover on connection errors, timeouts, 429 and 5xx).
   status, latency, token usage) and each user can review their own activity in the web UI.
 - Organization admins can set usage quotas (requests / prompt tokens / completion tokens per
   day, sliding 24h window) and a model/alias allowlist from the web UI.
+- Upstream servers are polled through their `GET /models` endpoint (periodically in the
+  background and on demand when a request is routed to them) to track which servers and
+  models are up, including model capabilities such as max context size and supported
+  modalities. The `Status` page in the web UI shows all of this.
 
 Built with FastAPI and requests. Persistence uses SQLAlchemy (SQLite by default).
 
@@ -36,8 +40,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Web UI: open http://127.0.0.1:8000/login and sign in with the username/password created
-above. `Activity` shows your logged requests with full headers and bodies; `Organizations`
-shows your orgs and, for admins, the quota/allowlist settings.
+above. `Activity` shows your logged requests with full headers and bodies; `Status` shows
+upstream server and model availability with capabilities; `Organizations` shows your orgs
+and, for admins, the quota/allowlist settings.
 
 ## Configuration
 
@@ -58,6 +63,11 @@ Server settings (env vars with `SWITCHBOARD_` prefix or a `.env` file):
 - `SWITCHBOARD_CONFIG_PATH` (default `config.yaml`)
 - `SWITCHBOARD_HOST`, `SWITCHBOARD_PORT` (defaults `127.0.0.1`, `8000`)
 - `SWITCHBOARD_QUOTA_WINDOW_HOURS` (default `24`)
+- `SWITCHBOARD_HEALTH_POLL_INTERVAL_SECONDS` (default `60`; `0` disables the periodic poller)
+- `SWITCHBOARD_HEALTH_POLL_TIMEOUT_SECONDS` (default `5`, per-upstream poll timeout)
+- `SWITCHBOARD_HEALTH_STALE_AFTER_SECONDS` (default `30`; when a chat request is routed to an
+  upstream whose last poll is older than this, a background re-poll is triggered; `0` re-polls
+  on every routed request)
 
 ## Routing and failover
 
@@ -67,6 +77,29 @@ to the target's upstream model name and `Authorization: Bearer <upstream api_key
 Connection errors, timeouts, HTTP 429 and HTTP 5xx trigger failover to the next target; other
 4xx responses are passed through to the client. If every target fails, the API returns 502.
 `stream: true` requests are proxied as SSE and the reassembled stream is logged.
+
+## Upstream health polling and the status dashboard
+
+Each configured upstream is polled at `GET <base_url>/models` (with its `api_key` as a bearer
+token when configured). Results are stored in the `upstream_status` table and shown on the
+`Status` web page, which lists every server (up/down, last checked, latency, error, model
+count) and every model/alias with its targets, whether the server currently lists the upstream
+model, and the model's capabilities.
+
+Polling happens three ways:
+
+- periodically, from a background thread started at server startup
+  (`SWITCHBOARD_HEALTH_POLL_INTERVAL_SECONDS`);
+- on demand, when a chat completion is routed to an upstream whose last poll is stale
+  (`SWITCHBOARD_HEALTH_STALE_AFTER_SECONDS`) — the re-poll runs in a background thread so it
+  never blocks the request;
+- manually, via the "Refresh now" button on the `Status` page (`POST /status/refresh`).
+
+Model capabilities are extracted from each entry of the upstream's model list. Common field
+names are normalized: `max_context_length` / `max_model_len` / `context_length` /
+`max_position_embeddings` become `max_context_length`, and `supported_modalities` /
+`modalities` / `input_modalities`+`output_modalities` become `modalities`. Any other fields
+returned by the upstream (e.g. `supported_parameters`, `owned_by`) are kept as-is.
 
 ## CLI
 
@@ -126,9 +159,10 @@ switchboard/
   security.py   password hashing, api key hashing, session tokens
   routing.py    model/alias -> ordered upstream targets
   proxy.py      upstream HTTP calls and failover (requests)
+  health.py     upstream /models polling, capability extraction, status persistence
   policy.py     org allowlist + quota enforcement
   api.py        /v1/models and /v1/chat/completions
-  web.py        login, activity viewer, org admin UI
+  web.py        login, activity viewer, status dashboard, org admin UI
   templates/    web UI templates
   cli.py        org/user/api-key management
 tests/          pytest suite with stub upstream servers
