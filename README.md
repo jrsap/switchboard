@@ -85,6 +85,33 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+## Running in a container
+
+```bash
+podman build -t switchboard .        # or: docker build -t switchboard .
+cp config.example.yaml config.yaml   # edit upstreams/keys
+mkdir -p data
+podman run --rm -p 8000:8000 \
+  -v "$PWD/config.yaml:/app/config.yaml:Z" \
+  -v "$PWD/data:/data:Z" \
+  -e MISTRAL_API_KEY=... -e OPENAI_API_KEY=... \
+  switchboard
+```
+
+The image ships with `config.example.yaml` copied to `/app/config.yaml` and stores the
+SQLite database at `/data/switchboard.db`, so mount `/data` to persist it and mount your own
+`config.yaml` to override upstreams and keys. Upstream API keys can also be passed purely as
+environment variables (e.g. `-e MISTRAL_API_KEY=...`), since `${VAR}` references in the config
+are expanded. To manage orgs/users/keys with the CLI inside the container, override the
+default command:
+
+```bash
+podman run --rm \
+  -v "$PWD/config.yaml:/app/config.yaml:Z" \
+  -v "$PWD/data:/data:Z" \
+  switchboard python -m switchboard.cli create-org --name Acme
+```
+
 The tests spin up stub upstream servers on 127.0.0.1 and cover model listing, chat
 completions, failover, quotas, allowlists, streaming, request logging and the web UI.
 
