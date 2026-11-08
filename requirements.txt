@@ -6,3 +6,4 @@ requests
 PyYAML
 jinja2
 PyJWT
+python-multipart
