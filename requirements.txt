@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic-settings
+requests
+PyYAML
+jinja2
+PyJWT

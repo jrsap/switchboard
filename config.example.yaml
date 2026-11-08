@@ -1,0 +1,25 @@
+upstreams:
+  - name: mistral
+    base_url: https://api.mistral.ai/v1
+    api_key: ${MISTRAL_API_KEY}
+  - name: openai
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
+
+models:
+  mistral-large-4:
+    - upstream: mistral
+      model: mistral-large-latest
+  gpt-4o:
+    - upstream: openai
+      model: gpt-4o
+  gpt-4o-mini:
+    - upstream: openai
+      model: gpt-4o-mini
+
+aliases:
+  big:
+    - mistral-large-4
+    - gpt-4o
+  fast:
+    - gpt-4o-mini
