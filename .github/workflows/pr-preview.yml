@@ -1,0 +1,145 @@
+name: PR preview
+
+# Runs on a self-hosted runner located in the private network (see
+# docs/pr-preview.md). Adds a required check that is green only if the PR's
+# test suite passes and the app bootstraps and answers /healthz, /v1/models
+# and /v1/chat/completions. On success it leaves a per-PR preview instance
+# running on the runner and posts its (LAN/VPN-only) link as a PR comment.
+# The preview is torn down when the PR is closed.
+#
+# Fork PRs are skipped unless a maintainer adds the "preview-deploy" label:
+# the self-hosted runner executes PR code and can reach the private network.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PREVIEW_STATE_ROOT: ${{ vars.PREVIEW_STATE_ROOT }}
+
+jobs:
+  preview:
+    name: Bootstrap check and preview deploy
+    if: >-
+      github.event.action != 'closed' &&
+      (github.event.pull_request.head.repo.full_name == github.repository ||
+      contains(github.event.pull_request.labels.*.name, 'preview-deploy'))
+    runs-on: [self-hosted, preview]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: Start preview environment
+        run: bash scripts/preview_env.sh up ${{ github.event.pull_request.number }} "$GITHUB_WORKSPACE"
+
+      - name: Smoke test preview
+        run: |
+          INFO_DIR="${PREVIEW_STATE_ROOT:-$HOME/switchboard-previews}/pr-${{ github.event.pull_request.number }}"
+          set -a; source "$INFO_DIR/info.env"; set +a
+          python scripts/smoke_test.py "http://127.0.0.1:$APP_PORT" "$API_KEY"
+
+      - name: Compute advertised preview URL
+        run: |
+          INFO_DIR="${PREVIEW_STATE_ROOT:-$HOME/switchboard-previews}/pr-${{ github.event.pull_request.number }}"
+          set -a; source "$INFO_DIR/info.env"; set +a
+          HOST="${{ vars.PREVIEW_ADVERTISED_HOST }}"
+          if [[ -z "$HOST" ]]; then HOST=$(hostname -I | awk '{print $1}'); fi
+          echo "PREVIEW_URL=http://$HOST:$APP_PORT" >> "$INFO_DIR/info.env"
+          echo "preview URL: http://$HOST:$APP_PORT"
+
+      - name: Post preview link on the PR
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- switchboard-pr-preview -->';
+            const root = process.env.PREVIEW_STATE_ROOT || `${process.env.HOME}/switchboard-previews`;
+            const raw = fs.readFileSync(`${root}/pr-${process.env.PR_NUMBER}/info.env`, 'utf8');
+            const info = {};
+            for (const line of raw.split('\n')) {
+              const i = line.indexOf('=');
+              if (i > 0) info[line.slice(0, i)] = line.slice(i + 1);
+            }
+            const body = `${marker}
+            ### PR preview environment
+
+            | | |
+            |---|---|
+            | App | ${info.PREVIEW_URL} |
+            | Web UI | ${info.PREVIEW_URL}/login — user \`${info.WEB_USERNAME}\`, password \`${info.WEB_PASSWORD}\` |
+            | API key | \`${info.API_KEY}\` |
+
+            \`\`\`bash
+            curl ${info.PREVIEW_URL}/v1/models -H "Authorization: Bearer ${info.API_KEY}"
+            \`\`\`
+
+            The preview runs this PR's code with a fresh database against a mock upstream
+            (no real provider API keys are involved). It is reachable only from the private
+            network (VPN/LAN) and is torn down automatically when this PR is closed.
+
+            This check is green only if the test suite passes and the app bootstraps and
+            answers \`/healthz\`, \`/v1/models\` and \`/v1/chat/completions\` (plain and streaming).
+            `;
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  teardown:
+    name: Teardown preview
+    if: github.event.action == 'closed'
+    runs-on: [self-hosted, preview]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop preview environment
+        run: bash scripts/preview_env.sh down ${{ github.event.pull_request.number }}
+
+      - name: Comment teardown on the PR
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        with:
+          script: |
+            const marker = '<!-- switchboard-pr-preview -->';
+            const body = `${marker}
+            ### PR preview environment
+
+            Torn down: this PR was closed, so the preview instance has been stopped and its
+            state removed from the runner.`;
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

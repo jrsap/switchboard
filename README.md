@@ -78,6 +78,15 @@ python -m switchboard.cli create-key --username alice --org Acme --name default 
 python -m switchboard.cli list-keys --username alice
 ```
 
+## PR preview environments
+
+PRs targeting `main` get a check run on a self-hosted runner in the private network: it is
+green only if the test suite passes and the app bootstraps and answers `/healthz`,
+`/v1/models` and `/v1/chat/completions`. On success a per-PR instance is left running and its
+LAN/VPN-only URL (plus throwaway web UI and API credentials) is posted as a PR comment; the
+instance is torn down when the PR closes. See [docs/pr-preview.md](docs/pr-preview.md) for
+runner setup, branch protection and security notes.
+
 ## Tests
 
 ```bash
