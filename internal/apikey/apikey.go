@@ -26,7 +26,7 @@ func Parse(key string) (orgID, secret string, ok bool) {
 		return "", "", false
 	}
 	orgID, secret, ok = strings.Cut(rest, "_")
-	if !ok || !ValidOrgID(orgID) || secret == "" || strings.ContainsRune(secret, '_') {
+	if !ok || !ValidOrgID(orgID) || secret == "" {
 		return "", "", false
 	}
 	return orgID, secret, true
