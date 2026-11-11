@@ -3,5 +3,9 @@ __pycache__/
 *.db
 .env
 config.yaml
+config.json
 .pytest_cache/
 *.egg-info/
+/switchboard
+/switchboard-admin
+/data/

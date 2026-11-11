@@ -1,0 +1,15 @@
+{
+  "listen": "127.0.0.1:8080",
+  "root_key": "6t3QJqtmNk40oLttDEhLDBZvmWcuR/+FMAWFDpZhmzY=",
+  "orgs": [
+    {
+      "id": "acme",
+      "name": "Acme",
+      "child_addr": "127.0.0.1:9001",
+      "storage": {
+        "db": "/var/lib/switchboard/acme/org.db",
+        "archive_root": "/var/lib/switchboard/acme/archive"
+      }
+    }
+  ]
+}
