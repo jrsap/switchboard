@@ -4,6 +4,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,7 +15,9 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
+	_ "modernc.org/sqlite"
 
+	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/globaldb"
 )
 
@@ -77,7 +80,7 @@ func userCommand(dbPath string, args []string) error {
 	if len(args) == 0 {
 		return errors.New("user: missing subcommand (add, list, show, delete, set-password, set-orgs)")
 	}
-	db, err := globaldb.Open(dbPath)
+	db, err := openGlobalDB(dbPath)
 	if err != nil {
 		return err
 	}
@@ -99,6 +102,14 @@ func userCommand(dbPath string, args []string) error {
 	default:
 		return fmt.Errorf("user: unknown subcommand %q", args[0])
 	}
+}
+
+func openGlobalDB(path string) (*globaldb.DB, error) {
+	sqlDB, err := sql.Open("sqlite", database.SQLiteDSN(path))
+	if err != nil {
+		return nil, err
+	}
+	return globaldb.Open(sqlDB)
 }
 
 func userAdd(db *globaldb.DB, args []string) error {

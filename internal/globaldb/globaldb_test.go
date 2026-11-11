@@ -1,14 +1,29 @@
 package globaldb
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/jrsap/switchboard/internal/database"
 )
+
+func openTestSQL(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	sqlDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	return sqlDB
+}
 
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "global.db"))
+	db, err := Open(openTestSQL(t, database.SQLiteDSN(filepath.Join(t.TempDir(), "global.db"))))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -17,7 +32,7 @@ func openTestDB(t *testing.T) *DB {
 }
 
 func TestMigrationsAreApplied(t *testing.T) {
-	db, err := Open(":memory:")
+	db, err := Open(openTestSQL(t, database.SQLiteDSN(":memory:")))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -29,8 +44,8 @@ func TestMigrationsAreApplied(t *testing.T) {
 	if n == 0 {
 		t.Fatal("expected at least one applied migration")
 	}
-	// Re-opening must be idempotent.
-	if err := db.migrate(); err != nil {
+	// Re-running the migrations must be idempotent.
+	if err := database.Migrate(db.sql, migrationsFS, "migrations"); err != nil {
 		t.Fatalf("re-migrate: %v", err)
 	}
 	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {

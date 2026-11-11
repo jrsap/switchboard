@@ -1,6 +1,10 @@
 // Package globaldb manages the global database. It holds users only — no
 // relationships or org data. Org membership on the user record is a
 // denormalized routing cache; each org DB is authoritative for its members.
+//
+// The driver is opened at the call site (see internal/database) and passed
+// in already initialized; this package only applies its own migrations and
+// runs the user queries.
 package globaldb
 
 import (
@@ -9,13 +13,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/jrsap/switchboard/internal/database"
 )
 
 //go:embed migrations/*.sql
@@ -31,87 +32,17 @@ type DB struct {
 	q   queries
 }
 
-// Open opens (creating if necessary) the global SQLite database at path and
-// applies all pending embedded migrations. Use ":memory:" for tests.
-func Open(path string) (*DB, error) {
-	dsn := path
-	if path != ":memory:" {
-		dsn = "file:" + path +
-			"?_pragma=busy_timeout(5000)" +
-			"&_pragma=journal_mode(WAL)" +
-			"&_pragma=foreign_keys(ON)"
-	} else {
-		dsn = "file::memory:?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+// Open wraps an already-open *sql.DB and applies the pending global DB
+// migrations. Closing the DB closes the underlying *sql.DB.
+func Open(sqlDB *sql.DB) (*DB, error) {
+	if err := database.Migrate(sqlDB, migrationsFS, "migrations"); err != nil {
+		return nil, fmt.Errorf("globaldb: migrate: %w", err)
 	}
-	sqlDB, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("globaldb: open %s: %w", path, err)
-	}
-	db := &DB{sql: sqlDB, q: sqliteQueries}
-	if err := db.migrate(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("globaldb: migrate %s: %w", path, err)
-	}
-	return db, nil
+	return &DB{sql: sqlDB, q: sqliteQueries}, nil
 }
 
 func (db *DB) Close() error {
 	return db.sql.Close()
-}
-
-// migrate is a small hand-rolled migration runner: embedded numbered .sql
-// files are applied in order, tracked in schema_migrations.
-func (db *DB) migrate() error {
-	if _, err := db.sql.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-		version    INTEGER PRIMARY KEY,
-		applied_at INTEGER NOT NULL
-	)`); err != nil {
-		return err
-	}
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
-	if err != nil {
-		return err
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
-			continue
-		}
-		name := strings.TrimSuffix(e.Name(), ".sql")
-		versionStr, _, _ := strings.Cut(name, "_")
-		version, err := strconv.Atoi(versionStr)
-		if err != nil {
-			return fmt.Errorf("migration file %q: version must be numeric", e.Name())
-		}
-		var applied int
-		err = db.sql.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, version).Scan(&applied)
-		if err != nil {
-			return err
-		}
-		if applied > 0 {
-			continue
-		}
-		stmt, err := migrationsFS.ReadFile("migrations/" + e.Name())
-		if err != nil {
-			return err
-		}
-		tx, err := db.sql.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(string(stmt)); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %d: %w", version, err)
-		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, time.Now().UnixNano()); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // User is a row of the global users table. Orgs is the denormalized routing

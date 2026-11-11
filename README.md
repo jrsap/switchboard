@@ -20,6 +20,10 @@ succeeds (failover on connection errors, timeouts, 429 and 5xx).
 Backend is Go, stdlib + `golang.org/x` only; `modernc.org/sqlite` is the single approved
 exception. Frontend (later): plain HTML/CSS, no JS libraries, no SPA.
 
+Router configuration is a single JSON file — see [docs/config.md](docs/config.md) for every
+option and value format, and [docs/config.example.json](docs/config.example.json) for a
+complete sample.
+
 ## Quickstart
 
 ```bash
