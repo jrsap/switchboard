@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"text/tabwriter"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/globaldb"
+	"github.com/jrsap/switchboard/internal/orgs"
 )
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
@@ -36,7 +38,17 @@ func main() {
 	if defaultDB == "" {
 		defaultDB = "switchboard-global.db"
 	}
+	defaultConfig := os.Getenv("SWITCHBOARD_CONFIG")
+	if defaultConfig == "" {
+		defaultConfig = "config.json"
+	}
+	defaultDataDir := os.Getenv("SWITCHBOARD_DATA_DIR")
+	if defaultDataDir == "" {
+		defaultDataDir = "data"
+	}
 	dbPath := flag.String("db", defaultDB, "path to the global database (or SWITCHBOARD_GLOBAL_DB)")
+	configPath := flag.String("config", defaultConfig, "path to the router config (or SWITCHBOARD_CONFIG)")
+	dataDir := flag.String("data-dir", defaultDataDir, "base directory for per-org storage (or SWITCHBOARD_DATA_DIR)")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -50,6 +62,8 @@ func main() {
 	switch args[0] {
 	case "user":
 		err = userCommand(*dbPath, args[1:])
+	case "org":
+		err = orgCommand(*dbPath, *configPath, *dataDir, args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -61,7 +75,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: switchboard-admin [-db PATH] <command> [flags]
+	fmt.Fprintf(os.Stderr, `Usage: switchboard-admin [-db PATH] [-config PATH] [-data-dir DIR] <command> [flags]
 
 Commands:
   user add -username NAME [-password PASS] [-org ORG]...
@@ -70,10 +84,111 @@ Commands:
   user delete -username NAME
   user set-password -username NAME [-password PASS]
   user set-orgs -username NAME [-org ORG]...
+  org add -id ID -name NAME -admin-username NAME [-admin-password PASS] [-child-addr host:port]
+  org list
 
 The global database path defaults to SWITCHBOARD_GLOBAL_DB or ./switchboard-global.db.
-If -password is omitted on add/set-password, it is prompted for.
+The router config defaults to SWITCHBOARD_CONFIG or ./config.json; per-org storage lives
+under SWITCHBOARD_DATA_DIR or ./data. If -password/-admin-password is omitted, it is
+prompted for.
 `)
+}
+
+func orgCommand(dbPath, configPath, dataDir string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("org: missing subcommand (add, list)")
+	}
+	switch args[0] {
+	case "add":
+		return orgAdd(dbPath, configPath, dataDir, args[1:])
+	case "list":
+		return orgList(configPath, args[1:])
+	default:
+		return fmt.Errorf("org: unknown subcommand %q", args[0])
+	}
+}
+
+func orgAdd(dbPath, configPath, dataDir string, args []string) error {
+	fs := flag.NewFlagSet("org add", flag.ExitOnError)
+	id := fs.String("id", "", "org id (lowercase [a-z0-9-], also the API key prefix) (required)")
+	name := fs.String("name", "", "org name (required)")
+	adminUsername := fs.String("admin-username", "", "username of the admin created with the org (required)")
+	adminPassword := fs.String("admin-password", "", "password for the admin user if it must be created (prompted if omitted)")
+	childAddr := fs.String("child-addr", "", "loopback host:port for the org child (allocated if omitted)")
+	fs.Parse(args)
+
+	if *id == "" || *name == "" || *adminUsername == "" || !usernameRe.MatchString(*adminUsername) {
+		return errors.New("org add: -id, -name and a valid -admin-username are required")
+	}
+
+	rootKey, err := orgs.RootKeyFromConfig(configPath)
+	if err != nil {
+		return err
+	}
+	gdb, err := openGlobalDB(dbPath)
+	if err != nil {
+		return err
+	}
+	defer gdb.Close()
+
+	// Only prompt for a password if the global user does not exist yet.
+	var hash string
+	needPassword := false
+	if _, err := gdb.GetUserByUsername(*adminUsername); errors.Is(err, globaldb.ErrNotFound) {
+		needPassword = true
+	} else if err != nil {
+		return err
+	}
+	if needPassword {
+		pass, err := passwordValue(*adminPassword)
+		if err != nil {
+			return err
+		}
+		h, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+		if err != nil {
+			return err
+		}
+		hash = string(h)
+	}
+
+	org, err := orgs.Create(orgs.CreateOptions{
+		ConfigPath:        configPath,
+		DataDir:           dataDir,
+		ID:                *id,
+		Name:              *name,
+		ChildAddr:         *childAddr,
+		AdminUsername:     *adminUsername,
+		AdminPasswordHash: hash,
+		RootKey:           rootKey,
+		GlobalDB:          gdb,
+		OpenSQL:           openOrgSQL,
+	})
+	if err != nil {
+		return err
+	}
+	abs, _ := filepath.Abs(org.Storage.DB)
+	fmt.Printf("created org %q (id %s)\n  name:        %s\n  child_addr:  %s\n  org db:      %s\n  archive:     %s\n  admin user:  %s\nrestart the router to spawn its child process\n",
+		org.Name, org.ID, org.Name, org.ChildAddr, abs, org.Storage.ArchiveRoot, *adminUsername)
+	return nil
+}
+
+func orgList(configPath string, args []string) error {
+	fs := flag.NewFlagSet("org list", flag.ExitOnError)
+	fs.Parse(args)
+	orgsList, err := orgs.List(configPath)
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tCHILD_ADDR\tORG DB")
+	for _, o := range orgsList {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", o.ID, o.Name, o.ChildAddr, o.Storage.DB)
+	}
+	return w.Flush()
+}
+
+func openOrgSQL(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", database.SQLiteDSN(path))
 }
 
 func userCommand(dbPath string, args []string) error {

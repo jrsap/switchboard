@@ -1,6 +1,9 @@
 package router
 
 import (
+	"bytes"
+	"context"
+	"database/sql"
 	"encoding/base64"
 	"io"
 	"net/http"
@@ -8,8 +11,28 @@ import (
 	"strings"
 	"testing"
 
+	_ "modernc.org/sqlite"
+
+	"github.com/jrsap/switchboard/internal/child"
 	"github.com/jrsap/switchboard/internal/config"
+	"github.com/jrsap/switchboard/internal/database"
+	"github.com/jrsap/switchboard/internal/orgdb"
+	"github.com/jrsap/switchboard/internal/seal"
 )
+
+func newChildServer(t *testing.T, orgID, token string) *child.Server {
+	t.Helper()
+	sqlDB, err := sql.Open("sqlite", database.SQLiteDSN(":memory:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	db, err := orgdb.Open(sqlDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return child.New(orgID, token, db)
+}
 
 func testConfig(childAddr string) *config.Config {
 	rootKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
@@ -17,10 +40,11 @@ func testConfig(childAddr string) *config.Config {
 		Listen:  "127.0.0.1:0",
 		RootKey: rootKey,
 		Orgs: []config.Org{{
-			ID:        "acme",
-			Name:      "Acme",
-			ChildAddr: childAddr,
-			Storage:   config.Storage{DB: "/tmp/acme.db", ArchiveRoot: "/tmp/acme/archive"},
+			ID:             "acme",
+			Name:           "Acme",
+			ChildAddr:      childAddr,
+			WrappedDataKey: base64.StdEncoding.EncodeToString(make([]byte, 72)),
+			Storage:        config.Storage{DB: "/tmp/acme.db", ArchiveRoot: "/tmp/acme/archive"},
 		}},
 	}
 }
@@ -40,6 +64,7 @@ func TestRoutesToOrgChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	srv.setReady("acme", true)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"big"}`))
 	req.Header.Set("Authorization", "Bearer sb_acme_somesecret")
@@ -89,6 +114,14 @@ func TestRejectsBadKeys(t *testing.T) {
 	}
 }
 
+func TestNewRequiresAtLeastOneOrg(t *testing.T) {
+	cfg := testConfig("127.0.0.1:1")
+	cfg.Orgs = nil
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected error for config without orgs")
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, err := New(testConfig("127.0.0.1:1"))
 	if err != nil {
@@ -106,11 +139,59 @@ func TestUpstreamErrorIs502(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	srv.setReady("acme", true)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer sb_acme_x")
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rr.Code)
+	}
+}
+
+func TestOrgNotReadyIs503(t *testing.T) {
+	srv, err := New(testConfig("127.0.0.1:1"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sb_acme_x")
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+}
+
+func TestHandshakeAgainstChild(t *testing.T) {
+	// The loopback spawn handshake contract, exercised against a real
+	// child handler over HTTP.
+	key, _ := seal.NewKey()
+	token, _ := seal.NewKey()
+	srv := newChildServer(t, "acme", base64.StdEncoding.EncodeToString(token))
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+	addr := strings.TrimPrefix(httpSrv.URL, "http://")
+
+	r, err := New(testConfig(addr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.waitHealthy(context.Background(), addr); err != nil {
+		t.Fatalf("waitHealthy: %v", err)
+	}
+	if err := r.handshake(context.Background(), addr, token, key); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if !srv.Ready() {
+		t.Fatal("child not ready after handshake")
+	}
+	if got := srv.DataKey(); !bytes.Equal(got, key) {
+		t.Fatal("child received wrong data key")
+	}
+	// Wrong token must fail.
+	bad, _ := seal.NewKey()
+	if err := r.handshake(context.Background(), addr, bad, key); err == nil {
+		t.Fatal("handshake with wrong token accepted")
 	}
 }
