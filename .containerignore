@@ -1,10 +1,7 @@
 .git
 .github
-__pycache__
-*.pyc
 *.db
-.env
-config.yaml
 data
-.pytest_cache
-tests
+config.json
+switchboard
+switchboard-admin
