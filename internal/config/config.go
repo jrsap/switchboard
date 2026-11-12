@@ -38,7 +38,11 @@ type Config struct {
 	// ChildBinary is the org child process executable the router spawns.
 	// Defaults to "switchboard-org" next to the router executable.
 	ChildBinary string `json:"child_binary,omitempty"`
-	Orgs        []Org  `json:"orgs"`
+	// GlobalDB and DataDir are NOT used by the router (it stays stateless,
+	// no database access); they are defaults for the admin CLI.
+	GlobalDB string `json:"global_db,omitempty"` // path to the global users DB
+	DataDir  string `json:"data_dir,omitempty"`  // base directory for per-org storage
+	Orgs     []Org  `json:"orgs"`
 }
 
 var listenRe = regexp.MustCompile(`^[^:]+:\d{1,5}$`)

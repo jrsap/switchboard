@@ -2,6 +2,8 @@
   "listen": "127.0.0.1:8080",
   "root_key": "6t3QJqtmNk40oLttDEhLDBZvmWcuR/+FMAWFDpZhmzY=",
   "child_binary": "/usr/local/bin/switchboard-org",
+  "global_db": "/var/lib/switchboard/global.db",
+  "data_dir": "/var/lib/switchboard",
   "orgs": [
     {
       "id": "acme",

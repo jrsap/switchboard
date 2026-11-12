@@ -17,7 +17,9 @@ business logic.
 | `listen` | `host:port`, e.g. `"0.0.0.0:8080"` | Public address the router listens on. |
 | `root_key` | base64 (standard encoding) of exactly 32 random bytes | Root key of the key hierarchy. Held only by the router process, never written to any DB; per-org data keys are wrapped with it and unwrapped in the loopback spawn handshake. Generate with e.g. `openssl rand -base64 32`. |
 | `child_binary` | path to an executable, optional | The org child process the router spawns per org. Defaults to `switchboard-org` next to the router executable. |
-| `orgs` | array of org objects (at least one) | One entry per organization = one child process. |
+| `global_db` | path, optional | Path to the global users DB. **Not used by the router** (it stays stateless, no DB access) — it is the default for the admin CLI's `-db`, so tooling has a single config file. CLI precedence: `-db` flag > `SWITCHBOARD_GLOBAL_DB` env > `global_db` > `./switchboard-global.db`. |
+| `data_dir` | path, optional | Base directory for per-org storage (`<data_dir>/<orgid>/…`). Also CLI-only. Precedence: `-data-dir` flag > `SWITCHBOARD_DATA_DIR` env > `data_dir` > `./data`. |
+| `orgs` | array of org objects (at least one at router startup; the file may start empty and be filled by `org add`) | One entry per organization = one child process. |
 
 ## Org options (`orgs[]`)
 

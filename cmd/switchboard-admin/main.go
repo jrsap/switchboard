@@ -18,6 +18,7 @@ import (
 	"golang.org/x/term"
 	_ "modernc.org/sqlite"
 
+	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/globaldb"
 	"github.com/jrsap/switchboard/internal/orgs"
@@ -34,23 +35,36 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func main() {
-	defaultDB := os.Getenv("SWITCHBOARD_GLOBAL_DB")
-	if defaultDB == "" {
-		defaultDB = "switchboard-global.db"
-	}
 	defaultConfig := os.Getenv("SWITCHBOARD_CONFIG")
 	if defaultConfig == "" {
 		defaultConfig = "config.json"
 	}
-	defaultDataDir := os.Getenv("SWITCHBOARD_DATA_DIR")
-	if defaultDataDir == "" {
-		defaultDataDir = "data"
-	}
-	dbPath := flag.String("db", defaultDB, "path to the global database (or SWITCHBOARD_GLOBAL_DB)")
+	dbPath := flag.String("db", os.Getenv("SWITCHBOARD_GLOBAL_DB"), "path to the global database (flag > SWITCHBOARD_GLOBAL_DB > config global_db > ./switchboard-global.db)")
 	configPath := flag.String("config", defaultConfig, "path to the router config (or SWITCHBOARD_CONFIG)")
-	dataDir := flag.String("data-dir", defaultDataDir, "base directory for per-org storage (or SWITCHBOARD_DATA_DIR)")
+	dataDir := flag.String("data-dir", os.Getenv("SWITCHBOARD_DATA_DIR"), "base directory for per-org storage (flag > SWITCHBOARD_DATA_DIR > config data_dir > ./data)")
 	flag.Usage = usage
 	flag.Parse()
+
+	// Fill unset -db/-data-dir from the config file (best effort: user
+	// commands don't need the config, org commands load it again anyway).
+	explicit := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if !explicit["db"] && *dbPath == "" || !explicit["data-dir"] && *dataDir == "" {
+		if cfg, err := config.Load(*configPath); err == nil {
+			if !explicit["db"] && *dbPath == "" && cfg.GlobalDB != "" {
+				*dbPath = cfg.GlobalDB
+			}
+			if !explicit["data-dir"] && *dataDir == "" && cfg.DataDir != "" {
+				*dataDir = cfg.DataDir
+			}
+		}
+	}
+	if *dbPath == "" {
+		*dbPath = "switchboard-global.db"
+	}
+	if *dataDir == "" {
+		*dataDir = "data"
+	}
 
 	args := flag.Args()
 	if len(args) == 0 {
@@ -87,10 +101,10 @@ Commands:
   org add -id ID -name NAME -admin-username NAME [-admin-password PASS] [-child-addr host:port]
   org list
 
-The global database path defaults to SWITCHBOARD_GLOBAL_DB or ./switchboard-global.db.
-The router config defaults to SWITCHBOARD_CONFIG or ./config.json; per-org storage lives
-under SWITCHBOARD_DATA_DIR or ./data. If -password/-admin-password is omitted, it is
-prompted for.
+The router config defaults to SWITCHBOARD_CONFIG or ./config.json. The global database
+path and per-org data dir resolve as: flag > env (SWITCHBOARD_GLOBAL_DB /
+SWITCHBOARD_DATA_DIR) > config (global_db / data_dir) > ./switchboard-global.db, ./data.
+If -password/-admin-password is omitted, it is prompted for.
 `)
 }
 

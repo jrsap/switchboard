@@ -36,14 +36,14 @@ complete sample.
 
 ```bash
 go build ./...
-cp config.example.json config.json   # set root_key (base64 32 bytes)
+cp config.example.json config.json   # set root_key (base64 32 bytes); global_db / data_dir are CLI defaults
 
 # create an org (creates its storage, org DB, wrapped data key, and one admin user)
-./switchboard-admin -config config.json -db data/global.db org add -id acme -name "Acme Corp" -admin-username alice
-./switchboard-admin -config config.json org list
+./switchboard-admin org add -id acme -name "Acme Corp" -admin-username alice
+./switchboard-admin org list
 
 # manage users in the global DB
-./switchboard-admin -db data/global.db user list
+./switchboard-admin user list
 
 # run the router; it spawns one switchboard-org child per org
 ./switchboard -config config.json

@@ -14,6 +14,8 @@ func validConfigJSON() string {
 	  "listen": "127.0.0.1:8080",
 	  "root_key": "` + rootKey + `",
 	  "child_binary": "/usr/local/bin/switchboard-org",
+	  "global_db": "/var/lib/switchboard/global.db",
+	  "data_dir": "/var/lib/switchboard",
 	  "orgs": [
 	    {
 	      "id": "acme",
@@ -50,6 +52,9 @@ func TestLoadValid(t *testing.T) {
 	}
 	if cfg.ChildBinary != "/usr/local/bin/switchboard-org" {
 		t.Fatalf("ChildBinary = %q", cfg.ChildBinary)
+	}
+	if cfg.GlobalDB != "/var/lib/switchboard/global.db" || cfg.DataDir != "/var/lib/switchboard" {
+		t.Fatalf("GlobalDB/DataDir = %q/%q", cfg.GlobalDB, cfg.DataDir)
 	}
 }
 
