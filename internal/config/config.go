@@ -22,16 +22,27 @@ type Storage struct {
 
 // Org is the router-side configuration for one child process.
 type Org struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	ChildAddr string  `json:"child_addr"` // loopback HTTP address of the child process
-	Storage   Storage `json:"storage"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ChildAddr string `json:"child_addr"` // loopback HTTP address of the child process
+	// WrappedDataKey is the org data key sealed with the root key
+	// (base64(nonce || ct), see internal/seal). The router unwraps it at
+	// spawn time and hands it to the child in the loopback handshake.
+	WrappedDataKey string  `json:"wrapped_data_key"`
+	Storage        Storage `json:"storage"`
 }
 
 type Config struct {
 	Listen  string `json:"listen"`
 	RootKey string `json:"root_key"` // base64-encoded 32-byte root key, held only by the router
-	Orgs    []Org  `json:"orgs"`
+	// ChildBinary is the org child process executable the router spawns.
+	// Defaults to "switchboard-org" next to the router executable.
+	ChildBinary string `json:"child_binary,omitempty"`
+	// GlobalDB and DataDir are NOT used by the router (it stays stateless,
+	// no database access); they are defaults for the admin CLI.
+	GlobalDB string `json:"global_db,omitempty"` // path to the global users DB
+	DataDir  string `json:"data_dir,omitempty"`  // base directory for per-org storage
+	Orgs     []Org  `json:"orgs"`
 }
 
 var listenRe = regexp.MustCompile(`^[^:]+:\d{1,5}$`)
@@ -59,9 +70,6 @@ func (c *Config) Validate() error {
 	if err != nil || len(rootKey) != 32 {
 		return fmt.Errorf("root_key must be a base64-encoded 32-byte key")
 	}
-	if len(c.Orgs) == 0 {
-		return fmt.Errorf("at least one org is required")
-	}
 	seen := make(map[string]bool, len(c.Orgs))
 	for i := range c.Orgs {
 		org := &c.Orgs[i]
@@ -77,6 +85,10 @@ func (c *Config) Validate() error {
 		}
 		if !listenRe.MatchString(org.ChildAddr) {
 			return fmt.Errorf("org %q: child_addr must be host:port, got %q", org.ID, org.ChildAddr)
+		}
+		wrapped, err := base64.StdEncoding.DecodeString(org.WrappedDataKey)
+		if err != nil || len(wrapped) < 24+16+32 {
+			return fmt.Errorf("org %q: wrapped_data_key must be base64(nonce||ct) sealing a 32-byte data key", org.ID)
 		}
 		if org.Storage.DB == "" {
 			return fmt.Errorf("org %q: storage.db is required", org.ID)
@@ -96,4 +108,13 @@ func (c *Config) Org(id string) *Org {
 		}
 	}
 	return nil
+}
+
+// Save writes the config back to path as indented JSON with 0600 perms.
+func (c *Config) Save(path string) error {
+	raw, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(raw, '\n'), 0o600)
 }

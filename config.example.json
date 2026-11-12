@@ -1,11 +1,15 @@
 {
   "listen": "127.0.0.1:8080",
   "root_key": "6t3QJqtmNk40oLttDEhLDBZvmWcuR/+FMAWFDpZhmzY=",
+  "child_binary": "/usr/local/bin/switchboard-org",
+  "global_db": "/var/lib/switchboard/global.db",
+  "data_dir": "/var/lib/switchboard",
   "orgs": [
     {
       "id": "acme",
-      "name": "Acme",
+      "name": "Acme Corp",
       "child_addr": "127.0.0.1:9001",
+      "wrapped_data_key": "LEDZM+KcZw8WRNdBpjJyosv6aoTHWUyl6Likksb3Zi5JMA4GgMoFC67qQU3h+r3Mnd3aBNQNw7gTnH/1aaWT9sEbzHSJxo5P",
       "storage": {
         "db": "/var/lib/switchboard/acme/org.db",
         "archive_root": "/var/lib/switchboard/acme/archive"
