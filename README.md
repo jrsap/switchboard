@@ -20,7 +20,10 @@ succeeds (failover on connection errors, timeouts, 429 and 5xx).
   `modernc.org/sqlite` (pure Go), migrations are embedded numbered `.sql` files applied
   by the shared hand-rolled runner in `internal/database`.
 - **Admin CLI** (`cmd/switchboard-admin`): user management in the global DB, plus
-  `org add` / `org list` (an org is created with exactly one admin user).
+  `org add` / `org list` (an org is created with exactly one admin user) and
+  per-org `provider` / `model` commands (providers with sealed upstream API keys,
+  upstream models with manual tool-calling/vision checkboxes and a user-specified
+  reasoning-level list), written to the org DB located via the router config.
 - **Key hierarchy** (`internal/seal`): root key held only by the router; per-org data
   keys stored wrapped (XChaCha20-Poly1305) in the org DB and handed unwrapped to the
   child in the spawn handshake; request bodies encrypted per org before storage.
@@ -44,6 +47,11 @@ cp config.example.json config.json   # set root_key (base64 32 bytes); global_db
 
 # manage users in the global DB
 ./switchboard-admin user list
+
+# configure providers and upstream models for an org (stored in the org DB)
+./switchboard-admin provider add -org acme -name openai -base-url https://api.openai.com/v1 -api-key sk-...
+./switchboard-admin model add -org acme -provider openai -name gpt-4o -tool-calling -vision -reasoning-level low -reasoning-level high
+./switchboard-admin model list -org acme
 
 # run the router; it spawns one switchboard-org child per org
 ./switchboard -config config.json

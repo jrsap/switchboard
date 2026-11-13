@@ -56,6 +56,32 @@ one `admin` member (creating the global user if needed and updating its org rout
 cache), and appends the org to the router config. Restart the router to spawn the new
 child.
 
+## Providers and models (per org)
+
+Providers and their upstream models live in the per-org DB (`storage.db` of the org
+entry), not in this router config. The admin CLI locates the org DB through the router
+config and unwraps the org data key (root key + wrapped key, cross-checked against the
+org DB meta) to seal secrets:
+
+```bash
+switchboard-admin provider add -org acme -name openai -base-url https://api.openai.com/v1 -api-key sk-...
+switchboard-admin provider list -org acme
+switchboard-admin model add -org acme -provider openai -name gpt-4o -tool-calling -vision -reasoning-level low -reasoning-level high
+switchboard-admin model list -org acme [-provider openai]
+switchboard-admin model delete -org acme -provider openai -name gpt-4o
+switchboard-admin provider delete -org acme -name openai   # cascades to its models
+```
+
+- The upstream API key is sealed with the org data key (`seal.Encrypt`,
+  XChaCha20-Poly1305) before it is stored, so plaintext never hits disk; only the org
+  child can open it after the spawn handshake. An empty `-api-key` means the upstream
+  needs no key (e.g. a local server).
+- `-tool-calling` / `-vision` are manual checkboxes on the model (no probing yet);
+  `-reasoning-level` is repeatable and sets the model's user-specified list of
+  supported reasoning levels (stored as a JSON array).
+- Model autodiscovery (listing/probing the upstream) comes later; for now models are
+  added manually.
+
 ## API key format
 
 API keys look like `sb_<orgid>_<secret>` (e.g. `sb_acme_…`), where `<secret>`
