@@ -1,10 +1,12 @@
-// Command switchboard-admin is the admin CLI. At this stage it manages
-// users in the global database only (orgs, providers, models and keys come
-// later, against the per-org databases).
+// Command switchboard-admin is the admin CLI. It manages users in the
+// global database, orgs (router config + per-org DB bootstrap), and the
+// per-org providers and upstream models; keys, quotas and aliases come
+// later.
 package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,7 +23,9 @@ import (
 	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/globaldb"
+	"github.com/jrsap/switchboard/internal/orgdb"
 	"github.com/jrsap/switchboard/internal/orgs"
+	"github.com/jrsap/switchboard/internal/seal"
 )
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
@@ -78,6 +82,10 @@ func main() {
 		err = userCommand(*dbPath, args[1:])
 	case "org":
 		err = orgCommand(*dbPath, *configPath, *dataDir, args[1:])
+	case "provider":
+		err = providerCommand(*configPath, args[1:])
+	case "model":
+		err = modelCommand(*configPath, args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -100,6 +108,17 @@ Commands:
   user set-orgs -username NAME [-org ORG]...
   org add -id ID -name NAME -admin-username NAME [-admin-password PASS] [-child-addr host:port]
   org list
+  provider add -org ORG -name NAME -base-url URL [-api-key KEY]
+  provider list -org ORG
+  provider delete -org ORG -name NAME
+  model add -org ORG -provider NAME -name NAME [-tool-calling] [-vision] [-reasoning-level LEVEL]...
+  model list -org ORG [-provider NAME]
+  model delete -org ORG -provider NAME -name NAME
+
+The provider/model commands operate on the per-org database located via the router
+config (storage.db of the org entry). Provider API keys are stored sealed with the
+org data key; -tool-calling / -vision are manual checkboxes and -reasoning-level is
+repeatable (the model's supported reasoning levels).
 
 The router config defaults to SWITCHBOARD_CONFIG or ./config.json. The global database
 path and per-org data dir resolve as: flag > env (SWITCHBOARD_GLOBAL_DB /
@@ -203,6 +222,275 @@ func orgList(configPath string, args []string) error {
 
 func openOrgSQL(path string) (*sql.DB, error) {
 	return sql.Open("sqlite", database.SQLiteDSN(path))
+}
+
+// openOrg loads the router config, locates the org, opens its per-org DB and
+// unwraps the org data key (root key from the config unwrapping the config
+// entry's wrapped key, cross-checked against the org DB meta). The returned
+// data key seals upstream provider API keys at rest.
+func openOrg(configPath, orgID string) (*orgdb.DB, []byte, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	org := cfg.Org(orgID)
+	if org == nil {
+		return nil, nil, fmt.Errorf("org %q not found in %s", orgID, configPath)
+	}
+	rootKey, err := base64.StdEncoding.DecodeString(cfg.RootKey)
+	if err != nil || len(rootKey) != seal.KeySize {
+		return nil, nil, fmt.Errorf("root_key must be a base64-encoded %d-byte key", seal.KeySize)
+	}
+	dataKey, err := seal.Unwrap(rootKey, org.WrappedDataKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unwrap data key of org %q: %w", orgID, err)
+	}
+	sqlDB, err := openOrgSQL(org.Storage.DB)
+	if err != nil {
+		return nil, nil, err
+	}
+	odb, err := orgdb.Open(sqlDB)
+	if err != nil {
+		sqlDB.Close()
+		return nil, nil, err
+	}
+	wrapped, err := odb.GetMeta(orgdb.MetaWrappedDataKey)
+	if err != nil || wrapped != org.WrappedDataKey {
+		odb.Close()
+		return nil, nil, fmt.Errorf("org %q: wrapped data key in the org DB does not match the router config", orgID)
+	}
+	return odb, dataKey, nil
+}
+
+func keyStatus(sealed string) string {
+	if sealed == "" {
+		return "none"
+	}
+	return "set (sealed at rest)"
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+func providerCommand(configPath string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("provider: missing subcommand (add, list, delete)")
+	}
+	switch args[0] {
+	case "add":
+		return providerAdd(configPath, args[1:])
+	case "list":
+		return providerList(configPath, args[1:])
+	case "delete":
+		return providerDelete(configPath, args[1:])
+	default:
+		return fmt.Errorf("provider: unknown subcommand %q", args[0])
+	}
+}
+
+func providerAdd(configPath string, args []string) error {
+	fs := flag.NewFlagSet("provider add", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	name := fs.String("name", "", "provider name (required)")
+	baseURL := fs.String("base-url", "", "upstream base URL, e.g. https://api.openai.com/v1 (required)")
+	apiKey := fs.String("api-key", "", "upstream API key, stored sealed with the org data key (empty = no key)")
+	fs.Parse(args)
+	if *orgID == "" || *name == "" || *baseURL == "" {
+		return errors.New("provider add: -org, -name and -base-url are required")
+	}
+	odb, dataKey, err := openOrg(configPath, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	sealed := ""
+	if *apiKey != "" {
+		if sealed, err = seal.Encrypt(dataKey, []byte(*apiKey)); err != nil {
+			return err
+		}
+	}
+	p, err := odb.AddProvider(*name, *baseURL, sealed)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created provider %q (id %d)\n  base_url: %s\n  api_key:  %s\n", p.Name, p.ID, p.BaseURL, keyStatus(sealed))
+	return nil
+}
+
+func providerList(configPath string, args []string) error {
+	fs := flag.NewFlagSet("provider list", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	fs.Parse(args)
+	if *orgID == "" {
+		return errors.New("provider list: -org is required")
+	}
+	odb, _, err := openOrg(configPath, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	providers, err := odb.ListProviders()
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tBASE_URL\tAPI_KEY\tCREATED")
+	for _, p := range providers {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", p.ID, p.Name, p.BaseURL, keyStatus(p.APIKey), p.CreatedAt.Format("2006-01-02 15:04:05"))
+	}
+	return w.Flush()
+}
+
+func providerDelete(configPath string, args []string) error {
+	fs := flag.NewFlagSet("provider delete", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	name := fs.String("name", "", "provider name (required)")
+	fs.Parse(args)
+	if *orgID == "" || *name == "" {
+		return errors.New("provider delete: -org and -name are required")
+	}
+	odb, _, err := openOrg(configPath, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	p, err := odb.GetProviderByName(*name)
+	if errors.Is(err, orgdb.ErrNotFound) {
+		return fmt.Errorf("provider %q not found in org %q", *name, *orgID)
+	}
+	if err != nil {
+		return err
+	}
+	if err := odb.DeleteProvider(p.ID); err != nil {
+		return err
+	}
+	fmt.Printf("deleted provider %q (id %d) and its models\n", p.Name, p.ID)
+	return nil
+}
+
+func modelCommand(configPath string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("model: missing subcommand (add, list, delete)")
+	}
+	switch args[0] {
+	case "add":
+		return modelAdd(configPath, args[1:])
+	case "list":
+		return modelList(configPath, args[1:])
+	case "delete":
+		return modelDelete(configPath, args[1:])
+	default:
+		return fmt.Errorf("model: unknown subcommand %q", args[0])
+	}
+}
+
+func modelAdd(configPath string, args []string) error {
+	fs := flag.NewFlagSet("model add", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	providerName := fs.String("provider", "", "provider name (required)")
+	name := fs.String("name", "", "upstream model name, e.g. gpt-4o (required)")
+	toolCalling := fs.Bool("tool-calling", false, "check if the model supports tool calling")
+	vision := fs.Bool("vision", false, "check if the model supports vision input")
+	var levels stringSlice
+	fs.Var(&levels, "reasoning-level", "supported reasoning level, repeatable (replaces nothing, sets the list)")
+	fs.Parse(args)
+	if *orgID == "" || *providerName == "" || *name == "" {
+		return errors.New("model add: -org, -provider and -name are required")
+	}
+	odb, _, err := openOrg(configPath, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	p, err := odb.GetProviderByName(*providerName)
+	if errors.Is(err, orgdb.ErrNotFound) {
+		return fmt.Errorf("provider %q not found in org %q", *providerName, *orgID)
+	}
+	if err != nil {
+		return err
+	}
+	m, err := odb.AddModel(p.ID, *name, *toolCalling, *vision, levels)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created model %q (id %d) on provider %q\n  tool_calling:     %s\n  vision:           %s\n  reasoning_levels: %s\n",
+		m.Name, m.ID, m.ProviderName, yesNo(m.ToolCalling), yesNo(m.Vision), strings.Join(m.ReasoningLevels, ","))
+	return nil
+}
+
+func modelList(configPath string, args []string) error {
+	fs := flag.NewFlagSet("model list", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	providerName := fs.String("provider", "", "limit to one provider")
+	fs.Parse(args)
+	if *orgID == "" {
+		return errors.New("model list: -org is required")
+	}
+	odb, _, err := openOrg(configPath, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	var models []*orgdb.Model
+	if *providerName != "" {
+		p, err := odb.GetProviderByName(*providerName)
+		if errors.Is(err, orgdb.ErrNotFound) {
+			return fmt.Errorf("provider %q not found in org %q", *providerName, *orgID)
+		}
+		if err != nil {
+			return err
+		}
+		models, err = odb.ListModelsByProvider(p.ID)
+		if err != nil {
+			return err
+		}
+	} else {
+		models, err = odb.ListModels()
+		if err != nil {
+			return err
+		}
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tPROVIDER\tMODEL\tTOOL_CALLING\tVISION\tREASONING_LEVELS\tCREATED")
+	for _, m := range models {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", m.ID, m.ProviderName, m.Name, yesNo(m.ToolCalling), yesNo(m.Vision), strings.Join(m.ReasoningLevels, ","), m.CreatedAt.Format("2006-01-02 15:04:05"))
+	}
+	return w.Flush()
+}
+
+func modelDelete(configPath string, args []string) error {
+	fs := flag.NewFlagSet("model delete", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	providerName := fs.String("provider", "", "provider name (required)")
+	name := fs.String("name", "", "upstream model name (required)")
+	fs.Parse(args)
+	if *orgID == "" || *providerName == "" || *name == "" {
+		return errors.New("model delete: -org, -provider and -name are required")
+	}
+	odb, _, err := openOrg(configPath, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	p, err := odb.GetProviderByName(*providerName)
+	if errors.Is(err, orgdb.ErrNotFound) {
+		return fmt.Errorf("provider %q not found in org %q", *providerName, *orgID)
+	}
+	if err != nil {
+		return err
+	}
+	if err := odb.DeleteModel(p.ID, *name); err != nil {
+		if errors.Is(err, orgdb.ErrNotFound) {
+			return fmt.Errorf("model %q not found on provider %q", *name, *providerName)
+		}
+		return err
+	}
+	fmt.Printf("deleted model %q from provider %q\n", *name, *providerName)
+	return nil
 }
 
 func userCommand(dbPath string, args []string) error {
