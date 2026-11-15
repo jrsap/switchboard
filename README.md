@@ -14,10 +14,12 @@ succeeds (failover on connection errors, timeouts, 429 and 5xx).
   loopback handshake, then listens on the public port and demultiplexes requests to
   the children over loopback HTTP. No business logic.
 - **Org child process** (`cmd/switchboard-org`): never reads the config file — the
-  router passes it everything it needs as startup flags (`-org`, `-addr`, `-db`,
-  `-archive-root`, `-spawn-token`) plus the unwrapped data key in the
-  `/internal/handshake` request. It serves loopback HTTP per org — `/healthz`, the
-  handshake, and (later) the org API — backed by its own org DB.
+  router passes it everything it needs as startup flags (`-org`, `-addr`, `-data-dir`,
+  `-spawn-token`) plus the unwrapped data key in the `/internal/handshake` request.
+  From the org id and the base data dir it derives its own storage paths
+  (`<data-dir>/<org>/org.db`, `<data-dir>/<org>/archive/`, see `internal/orgpath`).
+  It serves loopback HTTP per org — `/healthz`, the handshake, and (later) the org
+  API — backed by its own org DB.
 - **Global database** (`internal/globaldb`): users only. Org membership on the user
   record is a denormalized routing cache; each org DB is authoritative for its members.
 - **Per-org database** (`internal/orgdb`): written only by the org's child. SQLite via

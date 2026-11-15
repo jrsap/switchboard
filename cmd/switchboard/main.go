@@ -55,11 +55,13 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		httpSrv.Shutdown(shutdownCtx)
-		srv.StopChildren()
 	}()
 
 	log.Printf("switchboard: router listening on %s (%d orgs discovered in %s)", cfg.Listen, len(srv.OrgIDs()), cfg.DataDirOrDefault())
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("switchboard: %v", err)
 	}
+	// Stop the children synchronously before exiting so no child outlives
+	// the router (exec.CommandContext's kill would race with process exit).
+	srv.StopChildren()
 }

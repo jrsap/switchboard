@@ -14,6 +14,7 @@ import (
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/globaldb"
 	"github.com/jrsap/switchboard/internal/orgdb"
+	"github.com/jrsap/switchboard/internal/orgpath"
 	"github.com/jrsap/switchboard/internal/seal"
 )
 
@@ -73,13 +74,13 @@ func TestCreateOrg(t *testing.T) {
 
 	// Storage paths are derived from the data dir and the org id; the org
 	// exists because its DB file exists.
-	if org.DB != OrgDBPath(dataDir, "acme") || org.ArchiveRoot != OrgArchiveRoot(dataDir, "acme") {
+	if org.DB != orgpath.DBPath(dataDir, "acme") || org.ArchiveRoot != orgpath.ArchiveRoot(dataDir, "acme") {
 		t.Fatalf("unexpected paths: %+v", org)
 	}
-	if !OrgExists(dataDir, "acme") {
+	if !orgpath.Exists(dataDir, "acme") {
 		t.Fatal("org DB not created at the derived path")
 	}
-	ids, err := Discover(dataDir)
+	ids, err := orgpath.Discover(dataDir)
 	if err != nil || len(ids) != 1 || ids[0] != "acme" {
 		t.Fatalf("Discover = %v, %v", ids, err)
 	}
@@ -172,14 +173,14 @@ func TestDiscover(t *testing.T) {
 	dir := t.TempDir()
 
 	// Missing data dir: no orgs, no error.
-	ids, err := Discover(filepath.Join(dir, "nope"))
+	ids, err := orgpath.Discover(filepath.Join(dir, "nope"))
 	if err != nil || len(ids) != 0 {
 		t.Fatalf("Discover(missing) = %v, %v", ids, err)
 	}
 
 	// A dir named by a valid org id containing org.db is an org.
 	makeOrgDB := func(orgID string) {
-		dbPath := OrgDBPath(dir, orgID)
+		dbPath := orgpath.DBPath(dir, orgID)
 		if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -204,12 +205,12 @@ func TestDiscover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err = Discover(dir)
+	ids, err = orgpath.Discover(dir)
 	if err != nil || len(ids) != 2 || ids[0] != "acme" || ids[1] != "beta" {
 		t.Fatalf("Discover = %v, %v", ids, err)
 	}
-	if OrgExists(dir, "gamma") || OrgExists(dir, "delta") || !OrgExists(dir, "acme") {
-		t.Fatal("OrgExists broken")
+	if orgpath.Exists(dir, "gamma") || orgpath.Exists(dir, "delta") || !orgpath.Exists(dir, "acme") {
+		t.Fatal("Exists broken")
 	}
 }
 
