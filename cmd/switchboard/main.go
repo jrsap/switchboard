@@ -1,6 +1,7 @@
-// Command switchboard is the main router process. It spawns one child
-// process per organization, hands each its data key over loopback, listens
-// on the public port and demultiplexes requests to the children.
+// Command switchboard is the main router process. It discovers the orgs from
+// the data dir (one org DB per org), spawns one child process per org, hands
+// each its data key over loopback, listens on the public port and
+// demultiplexes requests to the children.
 package main
 
 import (
@@ -12,6 +13,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	_ "modernc.org/sqlite" // the router reads org DBs (discovery + wrapped data key)
 
 	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/router"
@@ -55,7 +58,7 @@ func main() {
 		srv.StopChildren()
 	}()
 
-	log.Printf("switchboard: router listening on %s (%d orgs)", cfg.Listen, len(cfg.Orgs))
+	log.Printf("switchboard: router listening on %s (%d orgs discovered in %s)", cfg.Listen, len(srv.OrgIDs()), cfg.DataDirOrDefault())
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("switchboard: %v", err)
 	}

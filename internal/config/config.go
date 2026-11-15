@@ -1,6 +1,13 @@
-// Package config loads and validates the router configuration. The router
-// is stateless: it holds only the root key and the per-child (per-org)
-// configuration. It never touches a database.
+// Package config loads and validates the global router configuration file.
+// The file holds only global settings: where the router listens, the root
+// key, and the base directory for per-org storage.
+//
+// Organizations are NOT configured in this file. An org exists iff its org
+// database exists at <data_dir>/<orgid>/org.db (see internal/orgs); the
+// router discovers orgs that way and loads the per-org config (wrapped data
+// key, org name) from the org DB itself. The org child process never reads
+// this file — the router passes it everything via command-line flags and
+// the loopback spawn handshake.
 package config
 
 import (
@@ -9,40 +16,28 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-
-	"github.com/jrsap/switchboard/internal/apikey"
 )
 
-// Storage is the per-org storage descriptor: where the org child keeps its
-// database and its encrypted archives. Never hardcoded elsewhere.
-type Storage struct {
-	DB          string `json:"db"`
-	ArchiveRoot string `json:"archive_root"`
-}
-
-// Org is the router-side configuration for one child process.
-type Org struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	ChildAddr string `json:"child_addr"` // loopback HTTP address of the child process
-	// WrappedDataKey is the org data key sealed with the root key
-	// (base64(nonce || ct), see internal/seal). The router unwraps it at
-	// spawn time and hands it to the child in the loopback handshake.
-	WrappedDataKey string  `json:"wrapped_data_key"`
-	Storage        Storage `json:"storage"`
-}
+// DefaultDataDir is the base directory for per-org storage when the config
+// sets no data_dir.
+const DefaultDataDir = "data"
 
 type Config struct {
 	Listen  string `json:"listen"`
-	RootKey string `json:"root_key"` // base64-encoded 32-byte root key, held only by the router
+	RootKey string `json:"root_key"` // base64-encoded 32-byte root key, held only by the router process
 	// ChildBinary is the org child process executable the router spawns.
 	// Defaults to "switchboard-org" next to the router executable.
 	ChildBinary string `json:"child_binary,omitempty"`
-	// GlobalDB and DataDir are NOT used by the router (it stays stateless,
-	// no database access); they are defaults for the admin CLI.
-	GlobalDB string `json:"global_db,omitempty"` // path to the global users DB
-	DataDir  string `json:"data_dir,omitempty"`  // base directory for per-org storage
-	Orgs     []Org  `json:"orgs"`
+	// GlobalDB is NOT used by the router (no business logic); it is the
+	// default for the admin CLI's -db. CLI precedence: -db flag >
+	// SWITCHBOARD_GLOBAL_DB env > global_db > ./switchboard-global.db.
+	GlobalDB string `json:"global_db,omitempty"`
+	// DataDir is the base directory for per-org storage; the router derives
+	// each org DB path as <data_dir>/<orgid>/org.db. The router itself only
+	// reads org DBs here (discovery + wrapped data key); all org business
+	// data is written by the org child. CLI precedence for -data-dir:
+	// flag > SWITCHBOARD_DATA_DIR env > data_dir > ./data.
+	DataDir string `json:"data_dir,omitempty"`
 }
 
 var listenRe = regexp.MustCompile(`^[^:]+:\d{1,5}$`)
@@ -70,44 +65,15 @@ func (c *Config) Validate() error {
 	if err != nil || len(rootKey) != 32 {
 		return fmt.Errorf("root_key must be a base64-encoded 32-byte key")
 	}
-	seen := make(map[string]bool, len(c.Orgs))
-	for i := range c.Orgs {
-		org := &c.Orgs[i]
-		if !apikey.ValidOrgID(org.ID) {
-			return fmt.Errorf("org %d: invalid id %q", i, org.ID)
-		}
-		if seen[org.ID] {
-			return fmt.Errorf("duplicate org id %q", org.ID)
-		}
-		seen[org.ID] = true
-		if org.Name == "" {
-			return fmt.Errorf("org %q: name is required", org.ID)
-		}
-		if !listenRe.MatchString(org.ChildAddr) {
-			return fmt.Errorf("org %q: child_addr must be host:port, got %q", org.ID, org.ChildAddr)
-		}
-		wrapped, err := base64.StdEncoding.DecodeString(org.WrappedDataKey)
-		if err != nil || len(wrapped) < 24+16+32 {
-			return fmt.Errorf("org %q: wrapped_data_key must be base64(nonce||ct) sealing a 32-byte data key", org.ID)
-		}
-		if org.Storage.DB == "" {
-			return fmt.Errorf("org %q: storage.db is required", org.ID)
-		}
-		if org.Storage.ArchiveRoot == "" {
-			return fmt.Errorf("org %q: storage.archive_root is required", org.ID)
-		}
-	}
 	return nil
 }
 
-// Org returns the org with the given id, or nil.
-func (c *Config) Org(id string) *Org {
-	for i := range c.Orgs {
-		if c.Orgs[i].ID == id {
-			return &c.Orgs[i]
-		}
+// DataDirOrDefault returns DataDir, or DefaultDataDir when unset.
+func (c *Config) DataDirOrDefault() string {
+	if c.DataDir == "" {
+		return DefaultDataDir
 	}
-	return nil
+	return c.DataDir
 }
 
 // Save writes the config back to path as indented JSON with 0600 perms.

@@ -212,6 +212,28 @@ func TestModels(t *testing.T) {
 	}
 }
 
+func TestReadMeta(t *testing.T) {
+	// ReadMeta reads org_meta from an already-open DB without migrating.
+	sqlDB, err := sql.Open("sqlite", database.SQLiteDSN(filepath.Join(t.TempDir(), "org.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := Open(sqlDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetMeta(MetaOrgName, "Acme"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := ReadMeta(sqlDB, MetaOrgName); err != nil || v != "Acme" {
+		t.Fatalf("ReadMeta = %q, %v", v, err)
+	}
+	if _, err := ReadMeta(sqlDB, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
 func TestNormalizeReasoningLevels(t *testing.T) {
 	levels, err := NormalizeReasoningLevels([]string{"high", "low", "high", "medium"})
 	if err != nil || len(levels) != 3 || levels[0] != "high" || levels[1] != "low" || levels[2] != "medium" {

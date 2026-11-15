@@ -30,8 +30,13 @@ var (
 	ErrConflict = errors.New("orgdb: conflict")
 )
 
-// Meta keys stored in org_meta.
-const MetaWrappedDataKey = "wrapped_data_key"
+// Meta keys stored in org_meta. The org DB is the org's own config store:
+// the router and the admin CLI discover an org from the existence of its DB
+// file and load these values from it (the config file holds no org entries).
+const (
+	MetaWrappedDataKey = "wrapped_data_key"
+	MetaOrgName        = "org_name"
+)
 
 type DB struct {
 	sql *sql.DB
@@ -59,6 +64,18 @@ func (db *DB) SetMeta(key, value string) error {
 func (db *DB) GetMeta(key string) (string, error) {
 	var value string
 	err := db.sql.QueryRow(db.q.getMeta, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return value, err
+}
+
+// ReadMeta reads one org_meta value from an already-open, already-migrated
+// org DB without applying migrations. For discovery paths that must not
+// write to the org DB (the router process reading the wrapped data key).
+func ReadMeta(sqlDB *sql.DB, key string) (string, error) {
+	var value string
+	err := sqlDB.QueryRow(`SELECT value FROM org_meta WHERE key = ?`, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
