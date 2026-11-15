@@ -3,13 +3,14 @@
 // loopback HTTP.
 //
 // Orgs are discovered, not configured: an org exists iff its org DB exists
-// at <data_dir>/<orgid>/org.db (see internal/orgs). At startup the router
+// at <data_dir>/<orgid>/org.db (see internal/orgpath). At startup the router
 // scans the data dir, reads each org's wrapped data key from its org DB
 // meta (the only thing it reads from org DBs — no business logic), allocates
 // a loopback address, spawns one child per org with everything it needs as
-// command-line flags (-org, -addr, -db, -archive-root, -spawn-token), waits
-// for its health check, and hands it the unwrapped org data key over the
-// loopback handshake. The child process never reads the router config file.
+// command-line flags (-org, -addr, -data-dir, -spawn-token — the child derives
+// its own storage paths from the org id and the base data dir), waits for its
+// health check, and hands it the unwrapped org data key over the loopback
+// handshake. The child process never reads the router config file.
 package router
 
 import (
@@ -35,6 +36,7 @@ import (
 	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/orgdb"
+	"github.com/jrsap/switchboard/internal/orgpath"
 	"github.com/jrsap/switchboard/internal/orgs"
 	"github.com/jrsap/switchboard/internal/seal"
 )
@@ -48,8 +50,8 @@ const (
 // orgChild is one discovered org plus the runtime child state.
 type orgChild struct {
 	ID             string
-	DBPath         string // derived: <data_dir>/<id>/org.db
-	ArchiveRoot    string // derived: <data_dir>/<id>/archive
+	DBPath         string // derived: orgpath.DBPath(dataDir, ID)
+	ArchiveRoot    string // derived: orgpath.ArchiveRoot(dataDir, ID)
 	ChildAddr      string // allocated at router startup
 	wrappedDataKey string // loaded from the org DB meta
 }
@@ -86,7 +88,7 @@ func New(cfg *config.Config) (*Server, error) {
 		binary = filepath.Join(filepath.Dir(exe), "switchboard-org")
 	}
 	dataDir := cfg.DataDirOrDefault()
-	ids, err := orgs.Discover(dataDir)
+	ids, err := orgpath.Discover(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("router: discover orgs in %s: %w", dataDir, err)
 	}
@@ -102,7 +104,7 @@ func New(cfg *config.Config) (*Server, error) {
 		client:   &http.Client{Timeout: httpClientTimeout},
 	}
 	for _, id := range ids {
-		dbPath := orgs.OrgDBPath(dataDir, id)
+		dbPath := orgpath.DBPath(dataDir, id)
 		wrapped, err := readWrappedDataKey(dbPath)
 		if err != nil {
 			return nil, fmt.Errorf("router: org %s: read org DB %s: %w", id, dbPath, err)
@@ -114,7 +116,7 @@ func New(cfg *config.Config) (*Server, error) {
 		oc := &orgChild{
 			ID:             id,
 			DBPath:         dbPath,
-			ArchiveRoot:    orgs.OrgArchiveRoot(dataDir, id),
+			ArchiveRoot:    orgpath.ArchiveRoot(dataDir, id),
 			ChildAddr:      addr,
 			wrappedDataKey: wrapped,
 		}
@@ -174,13 +176,14 @@ func (s *Server) startChild(ctx context.Context, oc *orgChild) error {
 		return err
 	}
 	// The child gets everything from the main process here: org id, loopback
-	// addr, org DB path, archive root and spawn token as flags; the data key
-	// comes in the handshake below. It never reads the config file.
+	// addr, the base data dir and a spawn token as flags; the data key comes
+	// in the handshake below. From -org + -data-dir the child derives its own
+	// storage paths (<data-dir>/<org>/org.db, .../archive) — it never reads
+	// the config file.
 	cmd := exec.CommandContext(ctx, s.binary,
 		"-org", oc.ID,
 		"-addr", oc.ChildAddr,
-		"-db", oc.DBPath,
-		"-archive-root", oc.ArchiveRoot,
+		"-data-dir", s.dataDir,
 		"-spawn-token", base64.StdEncoding.EncodeToString(token),
 	)
 	cmd.Stdout = os.Stdout

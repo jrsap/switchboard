@@ -21,7 +21,7 @@ import (
 	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/orgdb"
-	"github.com/jrsap/switchboard/internal/orgs"
+	"github.com/jrsap/switchboard/internal/orgpath"
 	"github.com/jrsap/switchboard/internal/seal"
 )
 
@@ -43,7 +43,7 @@ func newChildServer(t *testing.T, orgID, token string) *child.Server {
 // wrappedKey in its meta (empty = no meta row).
 func makeOrg(t *testing.T, dataDir, orgID, wrappedKey string) {
 	t.Helper()
-	dbPath := orgs.OrgDBPath(dataDir, orgID)
+	dbPath := orgpath.DBPath(dataDir, orgID)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		t.Fatal(err)
 	}

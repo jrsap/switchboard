@@ -49,10 +49,12 @@ everything via command-line flags and the loopback handshake.
 
 On startup the router scans `data_dir` for org DBs (`<orgid>/org.db`). Per
 discovered org it: reads the wrapped data key from the org DB meta, allocates
-a free loopback address, spawns `child_binary` with `-org`, `-addr`, `-db`,
-`-archive-root` and a random `-spawn-token` (all the org information the
-child needs comes from these flags — the child never opens the config file),
-polls `GET http://<child_addr>/healthz` until the child is up, then
+a free loopback address, spawns `child_binary` with `-org`, `-addr`, `-data-dir`
+and a random `-spawn-token`. All the org information the child needs comes from
+these flags — the child derives its own storage paths from the org id and the
+base data dir (`<data-dir>/<org>/org.db`, `<data-dir>/<org>/archive/`, see
+`internal/orgpath`) and never opens the config file. The router then polls
+`GET http://<child_addr>/healthz` until the child is up, then
 `POST /internal/handshake` (Bearer = spawn token) with the unwrapped org data
 key. Only then does the router proxy requests for the org; before that it
 answers `503`. The child keeps the data key in memory only. New orgs (new org
