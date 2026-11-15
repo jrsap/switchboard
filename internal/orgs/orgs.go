@@ -1,7 +1,12 @@
-// Package orgs implements organization management for the admin CLI:
-// creating an org (per-org DB + storage descriptor + wrapped data key +
-// exactly one admin member + global user routing cache + router config
-// entry) and listing orgs from the router config.
+// Package orgs implements organization management: an org is NOT an entry in
+// the router config file — an org exists iff its org DB exists at
+// OrgDBPath(dataDir, orgID), and everything org-specific (wrapped data key,
+// org name) is loaded from that database. Creating an org (admin CLI) means
+// creating its org DB under the base data dir, sealing a fresh data key with
+// the root key into org_meta, and adding exactly one admin member plus the
+// global user routing cache. The router discovers orgs the same way
+// (Discover) and spawns one child per org; the child never reads the config
+// file, it gets everything from the router via flags and the handshake.
 package orgs
 
 import (
@@ -12,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/jrsap/switchboard/internal/apikey"
 	"github.com/jrsap/switchboard/internal/config"
@@ -20,18 +26,84 @@ import (
 	"github.com/jrsap/switchboard/internal/seal"
 )
 
-var ErrOrgExists = errors.New("orgs: org already exists")
+var (
+	ErrOrgExists   = errors.New("orgs: org already exists")
+	ErrOrgNotFound = errors.New("orgs: org does not exist")
+)
 
 // SQLOpen opens a database/sql handle for the given path. Supplied by the
 // call site so this package stays driver-agnostic.
 type SQLOpen func(path string) (*sql.DB, error)
 
+// Org is one organization: id and name plus the derived storage paths.
+type Org struct {
+	ID          string
+	Name        string
+	DB          string // OrgDBPath(dataDir, ID)
+	ArchiveRoot string // OrgArchiveRoot(dataDir, ID)
+}
+
+// OrgDBPath derives the org DB path from the base data dir and the org id.
+// The org exists iff this file exists.
+func OrgDBPath(dataDir, orgID string) string {
+	return filepath.Join(dataDir, orgID, "org.db")
+}
+
+// OrgArchiveRoot derives the archive root from the base data dir and org id.
+func OrgArchiveRoot(dataDir, orgID string) string {
+	return filepath.Join(dataDir, orgID, "archive")
+}
+
+// OrgExists reports whether the org DB for orgID exists under dataDir.
+func OrgExists(dataDir, orgID string) bool {
+	fi, err := os.Stat(OrgDBPath(dataDir, orgID))
+	return err == nil && !fi.IsDir()
+}
+
+// Discover returns the ids of all orgs found under dataDir — subdirectories
+// named by a valid org id that contain an org.db file — sorted. A missing
+// dataDir yields no orgs, not an error.
+func Discover(dataDir string) ([]string, error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	for _, e := range entries {
+		if e.IsDir() && apikey.ValidOrgID(e.Name()) && OrgExists(dataDir, e.Name()) {
+			ids = append(ids, e.Name())
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// OpenOrgDB opens the org DB of an existing org (ErrOrgNotFound when the org
+// DB does not exist) and applies pending migrations. Used by admin tooling;
+// the router reads org DBs without migrating (orgdb.ReadMeta).
+func OpenOrgDB(dataDir, orgID string, openSQL SQLOpen) (*orgdb.DB, error) {
+	if !OrgExists(dataDir, orgID) {
+		return nil, fmt.Errorf("%w: %q (no org DB at %s)", ErrOrgNotFound, orgID, OrgDBPath(dataDir, orgID))
+	}
+	sqlDB, err := openSQL(OrgDBPath(dataDir, orgID))
+	if err != nil {
+		return nil, err
+	}
+	odb, err := orgdb.Open(sqlDB)
+	if err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	return odb, nil
+}
+
 type CreateOptions struct {
-	ConfigPath        string       // router config file to update
 	DataDir           string       // base directory for per-org storage
 	ID                string       // org id, also the API key prefix
-	Name              string       // human-readable name
-	ChildAddr         string       // optional; a free loopback port is allocated if empty
+	Name              string       // human-readable name, stored in the org DB meta
 	AdminUsername     string       // the exactly-one admin created with the org
 	AdminPasswordHash string       // used only if the global user has to be created
 	RootKey           []byte       // 32-byte root key, used to wrap the new org data key
@@ -39,8 +111,11 @@ type CreateOptions struct {
 	OpenSQL           SQLOpen      // opens the per-org SQLite DB
 }
 
-// Create creates a new org end to end and returns its router config entry.
-func Create(opts CreateOptions) (*config.Org, error) {
+// Create creates a new org end to end: <dataDir>/<id>/ with the org DB
+// (wrapped data key + org name in org_meta, one admin member) and the
+// archive root, plus the global user routing cache. It never touches the
+// router config file. Returns the created org with its derived paths.
+func Create(opts CreateOptions) (*Org, error) {
 	if !apikey.ValidOrgID(opts.ID) {
 		return nil, fmt.Errorf("invalid org id %q: must match ^[a-z0-9][a-z0-9-]{0,62}$", opts.ID)
 	}
@@ -53,21 +128,8 @@ func Create(opts CreateOptions) (*config.Org, error) {
 	if len(opts.RootKey) != seal.KeySize {
 		return nil, fmt.Errorf("root key must be %d bytes", seal.KeySize)
 	}
-
-	cfg, err := config.Load(opts.ConfigPath)
-	if err != nil {
-		return nil, err
-	}
-	if cfg.Org(opts.ID) != nil {
+	if OrgExists(opts.DataDir, opts.ID) {
 		return nil, fmt.Errorf("%w: %q", ErrOrgExists, opts.ID)
-	}
-
-	childAddr := opts.ChildAddr
-	if childAddr == "" {
-		childAddr, err = AllocateLoopbackAddr()
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	dataKey, err := seal.NewKey()
@@ -80,44 +142,42 @@ func Create(opts CreateOptions) (*config.Org, error) {
 	}
 
 	orgDir := filepath.Join(opts.DataDir, opts.ID)
-	dbPath := filepath.Join(orgDir, "org.db")
-	archiveRoot := filepath.Join(orgDir, "archive")
+	dbPath := OrgDBPath(opts.DataDir, opts.ID)
+	archiveRoot := OrgArchiveRoot(opts.DataDir, opts.ID)
 	if err := os.MkdirAll(archiveRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create org storage: %w", err)
+	}
+	// From here on the org dir exists; on failure remove it again so a
+	// half-created org is not "discovered" as an existing org.
+	fail := func(err error) (*Org, error) {
+		os.RemoveAll(orgDir)
+		return nil, err
 	}
 
 	sqlDB, err := opts.OpenSQL(dbPath)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	defer sqlDB.Close()
 	odb, err := orgdb.Open(sqlDB)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if err := odb.SetMeta(orgdb.MetaWrappedDataKey, wrapped); err != nil {
-		return nil, fmt.Errorf("store wrapped data key: %w", err)
+		return fail(fmt.Errorf("store wrapped data key: %w", err))
+	}
+	if err := odb.SetMeta(orgdb.MetaOrgName, opts.Name); err != nil {
+		return fail(fmt.Errorf("store org name: %w", err))
 	}
 	if _, err := odb.AddMember(opts.AdminUsername, "admin"); err != nil {
-		return nil, fmt.Errorf("add admin member: %w", err)
+		return fail(fmt.Errorf("add admin member: %w", err))
 	}
 
 	if err := addToGlobalUser(opts.GlobalDB, opts.AdminUsername, opts.AdminPasswordHash, opts.ID); err != nil {
-		return nil, err
+		return fail(err)
 	}
 
-	org := config.Org{
-		ID:             opts.ID,
-		Name:           opts.Name,
-		ChildAddr:      childAddr,
-		WrappedDataKey: wrapped,
-		Storage:        config.Storage{DB: dbPath, ArchiveRoot: archiveRoot},
-	}
-	cfg.Orgs = append(cfg.Orgs, org)
-	if err := cfg.Save(opts.ConfigPath); err != nil {
-		return nil, fmt.Errorf("update router config: %w", err)
-	}
-	return &org, nil
+	return &Org{ID: opts.ID, Name: opts.Name, DB: dbPath, ArchiveRoot: archiveRoot}, nil
 }
 
 func addToGlobalUser(db *globaldb.DB, username, passwordHash, orgID string) error {
@@ -137,13 +197,27 @@ func addToGlobalUser(db *globaldb.DB, username, passwordHash, orgID string) erro
 	return db.SetOrgs(u.ID, append(u.Orgs, orgID))
 }
 
-// List returns the orgs from the router config file.
-func List(configPath string) ([]config.Org, error) {
-	cfg, err := config.Load(configPath)
+// List returns all orgs discovered under dataDir, with names loaded from
+// their org DBs.
+func List(dataDir string, openSQL SQLOpen) ([]*Org, error) {
+	ids, err := Discover(dataDir)
 	if err != nil {
 		return nil, err
 	}
-	return cfg.Orgs, nil
+	var orgs []*Org
+	for _, id := range ids {
+		org := &Org{ID: id, DB: OrgDBPath(dataDir, id), ArchiveRoot: OrgArchiveRoot(dataDir, id)}
+		odb, err := OpenOrgDB(dataDir, id, openSQL)
+		if err != nil {
+			return nil, err
+		}
+		if name, err := odb.GetMeta(orgdb.MetaOrgName); err == nil {
+			org.Name = name
+		}
+		odb.Close()
+		orgs = append(orgs, org)
+	}
+	return orgs, nil
 }
 
 // RootKeyFromConfig loads the root key from the router config file.

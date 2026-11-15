@@ -8,6 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,6 +21,7 @@ import (
 	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/orgdb"
+	"github.com/jrsap/switchboard/internal/orgs"
 	"github.com/jrsap/switchboard/internal/seal"
 )
 
@@ -34,22 +39,84 @@ func newChildServer(t *testing.T, orgID, token string) *child.Server {
 	return child.New(orgID, token, db)
 }
 
-func testConfig(childAddr string) *config.Config {
+// makeOrg creates an org DB at its derived path under dataDir, with
+// wrappedKey in its meta (empty = no meta row).
+func makeOrg(t *testing.T, dataDir, orgID, wrappedKey string) {
+	t.Helper()
+	dbPath := orgs.OrgDBPath(dataDir, orgID)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := sql.Open("sqlite", database.SQLiteDSN(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := orgdb.Open(sqlDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrappedKey != "" {
+		if err := db.SetMeta(orgdb.MetaWrappedDataKey, wrappedKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+}
+
+func testConfig(dataDir string) *config.Config {
 	rootKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	return &config.Config{
 		Listen:  "127.0.0.1:0",
 		RootKey: rootKey,
-		Orgs: []config.Org{{
-			ID:             "acme",
-			Name:           "Acme",
-			ChildAddr:      childAddr,
-			WrappedDataKey: base64.StdEncoding.EncodeToString(make([]byte, 72)),
-			Storage:        config.Storage{DB: "/tmp/acme.db", ArchiveRoot: "/tmp/acme/archive"},
-		}},
+		DataDir: dataDir,
+	}
+}
+
+// pointAt retargets an org's reverse proxy at addr (tests only; New
+// allocates a fresh loopback addr per org).
+func pointAt(srv *Server, orgID, addr string) {
+	target := &url.URL{Scheme: "http", Host: addr}
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		writeError(w, http.StatusBadGateway, "upstream unavailable", "upstream_error")
+	}
+	srv.proxies[orgID] = rp
+}
+
+func TestNewDiscoversOrgsFromDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	wrapped := base64.StdEncoding.EncodeToString(make([]byte, 72))
+	makeOrg(t, dataDir, "beta", wrapped)
+	makeOrg(t, dataDir, "acme", wrapped)
+
+	srv, err := New(testConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ids := srv.OrgIDs()
+	if len(ids) != 2 || ids[0] != "acme" || ids[1] != "beta" {
+		t.Fatalf("OrgIDs = %v", ids)
+	}
+
+	// An org DB without a wrapped data key in its meta fails at New.
+	makeOrg(t, dataDir, "broken", "")
+	if _, err := New(testConfig(dataDir)); err == nil {
+		t.Fatal("org DB without wrapped data key accepted")
+	}
+
+	// No orgs at all is fine; a missing data dir is fine too.
+	for _, dir := range []string{t.TempDir(), filepath.Join(t.TempDir(), "nope")} {
+		srv, err := New(testConfig(dir))
+		if err != nil || len(srv.OrgIDs()) != 0 {
+			t.Fatalf("dataDir %s: orgs=%v err=%v", dir, srv.OrgIDs(), err)
+		}
 	}
 }
 
 func TestRoutesToOrgChild(t *testing.T) {
+	dataDir := t.TempDir()
+	makeOrg(t, dataDir, "acme", base64.StdEncoding.EncodeToString(make([]byte, 72)))
+
 	child := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("X-Child", "acme")
@@ -58,12 +125,11 @@ func TestRoutesToOrgChild(t *testing.T) {
 	}))
 	defer child.Close()
 
-	// child_addr is host:port; strip the scheme from the test server URL.
-	addr := strings.TrimPrefix(child.URL, "http://")
-	srv, err := New(testConfig(addr))
+	srv, err := New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	pointAt(srv, "acme", strings.TrimPrefix(child.URL, "http://"))
 	srv.setReady("acme", true)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"big"}`))
@@ -82,12 +148,14 @@ func TestRoutesToOrgChild(t *testing.T) {
 }
 
 func TestRejectsBadKeys(t *testing.T) {
+	dataDir := t.TempDir()
+	makeOrg(t, dataDir, "acme", base64.StdEncoding.EncodeToString(make([]byte, 72)))
+
 	child := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("child must not be reached")
 	}))
 	defer child.Close()
-	addr := strings.TrimPrefix(child.URL, "http://")
-	srv, err := New(testConfig(addr))
+	srv, err := New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -96,7 +164,7 @@ func TestRejectsBadKeys(t *testing.T) {
 		"no header":           "",
 		"wrong scheme":        "Basic sb_acme_x",
 		"no prefix":           "Bearer acme_x",
-		"unknown org":         "Bearer sb_other_x",
+		"unknown org":         "Bearer sb_other_x", // no org DB for "other"
 		"empty secret":        "Bearer sb_acme_",
 		"bad org id":          "Bearer sb_ACME_x",
 		"no secret separator": "Bearer sb_acme",
@@ -114,16 +182,8 @@ func TestRejectsBadKeys(t *testing.T) {
 	}
 }
 
-func TestNewRequiresAtLeastOneOrg(t *testing.T) {
-	cfg := testConfig("127.0.0.1:1")
-	cfg.Orgs = nil
-	if _, err := New(cfg); err == nil {
-		t.Fatal("expected error for config without orgs")
-	}
-}
-
 func TestHealthz(t *testing.T) {
-	srv, err := New(testConfig("127.0.0.1:1"))
+	srv, err := New(testConfig(t.TempDir()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -135,7 +195,9 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestUpstreamErrorIs502(t *testing.T) {
-	srv, err := New(testConfig("127.0.0.1:1")) // nothing listening
+	dataDir := t.TempDir()
+	makeOrg(t, dataDir, "acme", base64.StdEncoding.EncodeToString(make([]byte, 72)))
+	srv, err := New(testConfig(dataDir)) // allocated child addr: nothing listening
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -150,7 +212,9 @@ func TestUpstreamErrorIs502(t *testing.T) {
 }
 
 func TestOrgNotReadyIs503(t *testing.T) {
-	srv, err := New(testConfig("127.0.0.1:1"))
+	dataDir := t.TempDir()
+	makeOrg(t, dataDir, "acme", base64.StdEncoding.EncodeToString(make([]byte, 72)))
+	srv, err := New(testConfig(dataDir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -173,7 +237,7 @@ func TestHandshakeAgainstChild(t *testing.T) {
 	defer httpSrv.Close()
 	addr := strings.TrimPrefix(httpSrv.URL, "http://")
 
-	r, err := New(testConfig(addr))
+	r, err := New(testConfig(t.TempDir()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -29,7 +29,6 @@ func writeConfig(t *testing.T, dir string) (string, []byte) {
 	cfg := config.Config{
 		Listen:  "127.0.0.1:18080",
 		RootKey: base64.StdEncoding.EncodeToString(rootKey),
-		Orgs:    nil,
 	}
 	path := filepath.Join(dir, "config.json")
 	if err := cfg.Save(path); err != nil {
@@ -54,12 +53,12 @@ func openGlobal(t *testing.T, dir string) *globaldb.DB {
 
 func TestCreateOrg(t *testing.T) {
 	dir := t.TempDir()
-	cfgPath, rootKey := writeConfig(t, dir)
+	dataDir := filepath.Join(dir, "data")
+	rootKey, _ := seal.NewKey()
 	gdb := openGlobal(t, dir)
 
 	org, err := Create(CreateOptions{
-		ConfigPath:        cfgPath,
-		DataDir:           filepath.Join(dir, "data"),
+		DataDir:           dataDir,
 		ID:                "acme",
 		Name:              "Acme Corp",
 		AdminUsername:     "alice",
@@ -71,28 +70,37 @@ func TestCreateOrg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if org.ChildAddr == "" || org.WrappedDataKey == "" {
-		t.Fatalf("incomplete org entry: %+v", org)
+
+	// Storage paths are derived from the data dir and the org id; the org
+	// exists because its DB file exists.
+	if org.DB != OrgDBPath(dataDir, "acme") || org.ArchiveRoot != OrgArchiveRoot(dataDir, "acme") {
+		t.Fatalf("unexpected paths: %+v", org)
+	}
+	if !OrgExists(dataDir, "acme") {
+		t.Fatal("org DB not created at the derived path")
+	}
+	ids, err := Discover(dataDir)
+	if err != nil || len(ids) != 1 || ids[0] != "acme" {
+		t.Fatalf("Discover = %v, %v", ids, err)
 	}
 
-	// The wrapped key must unwrap to a 32-byte data key with the root key.
-	dataKey, err := seal.Unwrap(rootKey, org.WrappedDataKey)
+	// Org DB holds the wrapped key and the org name; the wrapped key must
+	// unwrap to a 32-byte data key with the root key.
+	odb, err := OpenOrgDB(dataDir, "acme", testSQLOpen(t))
+	if err != nil {
+		t.Fatalf("OpenOrgDB: %v", err)
+	}
+	defer odb.Close()
+	wrapped, err := odb.GetMeta(orgdb.MetaWrappedDataKey)
+	if err != nil {
+		t.Fatalf("GetMeta(wrapped_data_key): %v", err)
+	}
+	dataKey, err := seal.Unwrap(rootKey, wrapped)
 	if err != nil || len(dataKey) != seal.KeySize {
 		t.Fatalf("wrapped data key does not unwrap: %v", err)
 	}
-
-	// Org DB has the wrapped key and exactly the admin member.
-	sqlDB, err := testSQLOpen(t)(org.Storage.DB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
-	odb, err := orgdb.Open(sqlDB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v, err := odb.GetMeta(orgdb.MetaWrappedDataKey); err != nil || v != org.WrappedDataKey {
-		t.Fatalf("org db wrapped key = %q, %v", v, err)
+	if name, err := odb.GetMeta(orgdb.MetaOrgName); err != nil || name != "Acme Corp" {
+		t.Fatalf("org name = %q, %v", name, err)
 	}
 	members, err := odb.ListMembers()
 	if err != nil || len(members) != 1 || members[0].Username != "alice" || members[0].Role != "admin" {
@@ -105,18 +113,9 @@ func TestCreateOrg(t *testing.T) {
 		t.Fatalf("global user = %+v, %v", u, err)
 	}
 
-	// Router config was updated and stays valid.
-	orgs, err := List(cfgPath)
-	if err != nil || len(orgs) != 1 || orgs[0].ID != "acme" {
-		t.Fatalf("List = %+v, %v", orgs, err)
-	}
-	if _, err := config.Load(cfgPath); err != nil {
-		t.Fatalf("updated config invalid: %v", err)
-	}
-
-	// Duplicate org id rejected.
+	// Duplicate org id rejected (the org DB already exists).
 	_, err = Create(CreateOptions{
-		ConfigPath: cfgPath, DataDir: filepath.Join(dir, "data"), ID: "acme", Name: "Dup",
+		DataDir: dataDir, ID: "acme", Name: "Dup",
 		AdminUsername: "bob", AdminPasswordHash: "h", RootKey: rootKey, GlobalDB: gdb, OpenSQL: testSQLOpen(t),
 	})
 	if !errors.Is(err, ErrOrgExists) {
@@ -125,7 +124,7 @@ func TestCreateOrg(t *testing.T) {
 
 	// Second org reuses an existing global user and just extends the cache.
 	org2, err := Create(CreateOptions{
-		ConfigPath: cfgPath, DataDir: filepath.Join(dir, "data"), ID: "beta", Name: "Beta",
+		DataDir: dataDir, ID: "beta", Name: "Beta",
 		AdminUsername: "alice", AdminPasswordHash: "ignored", RootKey: rootKey, GlobalDB: gdb, OpenSQL: testSQLOpen(t),
 	})
 	if err != nil {
@@ -135,17 +134,23 @@ func TestCreateOrg(t *testing.T) {
 	if len(u.Orgs) != 2 {
 		t.Fatalf("global user orgs = %v, want 2 entries", u.Orgs)
 	}
-	if org2.Storage.DB == org.Storage.DB {
+	if org2.DB == org.DB {
 		t.Fatal("orgs must have distinct storage")
+	}
+
+	// List discovers both orgs from the data dir, with names from their DBs.
+	list, err := List(dataDir, testSQLOpen(t))
+	if err != nil || len(list) != 2 || list[0].ID != "acme" || list[0].Name != "Acme Corp" || list[1].ID != "beta" {
+		t.Fatalf("List = %+v, %v", list, err)
 	}
 }
 
 func TestCreateValidates(t *testing.T) {
 	dir := t.TempDir()
-	cfgPath, rootKey := writeConfig(t, dir)
+	rootKey, _ := seal.NewKey()
 	gdb := openGlobal(t, dir)
 	base := CreateOptions{
-		ConfigPath: cfgPath, DataDir: filepath.Join(dir, "data"), Name: "X",
+		DataDir: filepath.Join(dir, "data"), Name: "X",
 		AdminUsername: "a", AdminPasswordHash: "h", RootKey: rootKey, GlobalDB: gdb, OpenSQL: testSQLOpen(t),
 	}
 	for _, id := range []string{"", "Bad_ID", "-x", "a b"} {
@@ -160,6 +165,75 @@ func TestCreateValidates(t *testing.T) {
 	opts.Name = ""
 	if _, err := Create(opts); err == nil {
 		t.Error("empty name accepted")
+	}
+}
+
+func TestDiscover(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing data dir: no orgs, no error.
+	ids, err := Discover(filepath.Join(dir, "nope"))
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("Discover(missing) = %v, %v", ids, err)
+	}
+
+	// A dir named by a valid org id containing org.db is an org.
+	makeOrgDB := func(orgID string) {
+		dbPath := OrgDBPath(dir, orgID)
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		sqlDB, err := testSQLOpen(t)(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err := orgdb.Open(sqlDB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+	makeOrgDB("acme")
+	makeOrgDB("beta")
+	// Not orgs: invalid id dir with org.db, valid id dir without org.db, plain file.
+	makeOrgDB("Bad_ID")
+	if err := os.MkdirAll(filepath.Join(dir, "gamma"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "delta.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err = Discover(dir)
+	if err != nil || len(ids) != 2 || ids[0] != "acme" || ids[1] != "beta" {
+		t.Fatalf("Discover = %v, %v", ids, err)
+	}
+	if OrgExists(dir, "gamma") || OrgExists(dir, "delta") || !OrgExists(dir, "acme") {
+		t.Fatal("OrgExists broken")
+	}
+}
+
+func TestOpenOrgDBNotFound(t *testing.T) {
+	_, err := OpenOrgDB(t.TempDir(), "ghost", testSQLOpen(t))
+	if !errors.Is(err, ErrOrgNotFound) {
+		t.Fatalf("want ErrOrgNotFound, got %v", err)
+	}
+}
+
+func TestRootKeyFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath, rootKey := writeConfig(t, dir)
+	got, err := RootKeyFromConfig(cfgPath)
+	if err != nil || string(got) != string(rootKey) {
+		t.Fatalf("RootKeyFromConfig: %v", err)
+	}
+
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"listen":"127.0.0.1:1","root_key":"AAAA"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RootKeyFromConfig(bad); err == nil {
+		t.Fatal("short root key accepted")
 	}
 }
 
