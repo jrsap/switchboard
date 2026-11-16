@@ -5,7 +5,9 @@ package apikey
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"regexp"
 	"strings"
 )
@@ -42,6 +44,19 @@ func New(orgID string) (string, error) {
 		return "", err
 	}
 	return prefix + orgID + "_" + base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// Prefix returns the non-secret routing prefix of a key for an org
+// ("sb_<orgid>"). It is the only key material that may be logged.
+func Prefix(orgID string) string {
+	return prefix + orgID
+}
+
+// HashSecret returns the SHA-256 hex digest of a key's secret part. Only
+// this digest is stored in the org DB; the plaintext is never persisted.
+func HashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
 }
 
 type InvalidOrgIDError struct {

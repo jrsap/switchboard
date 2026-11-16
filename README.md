@@ -64,6 +64,12 @@ cp config.example.json config.json   # set root_key (base64 32 bytes); global_db
 ./switchboard-admin model add -org acme -provider openai -name gpt-4o -tool-calling -vision -reasoning-level low -reasoning-level high
 ./switchboard-admin model list -org acme
 
+# manage org API keys (sb_<orgid>_<secret>): only a SHA-256 hash of the secret
+# is stored; `key add` prints the full key exactly once
+./switchboard-admin key add -org acme -username alice -label ci
+./switchboard-admin key list -org acme
+./switchboard-admin key revoke -org acme -id 1
+
 # run the router; it spawns one switchboard-org child per org
 ./switchboard -config config.json
 ```

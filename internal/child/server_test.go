@@ -67,8 +67,8 @@ func TestHealthzBeforeAndAfterHandshake(t *testing.T) {
 
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("gated endpoint after handshake: %d, want 404", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("gated endpoint after handshake without key: %d, want 401", rr.Code)
 	}
 }
 
