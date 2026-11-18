@@ -117,3 +117,19 @@ presented with another org's prefix fails closed.
   `docs/config.example.json` valid JSON so it can be copied verbatim.
 - Validation happens at load time: bad `root_key` or a malformed `listen`
   aborts startup with an error.
+
+## API keys (per org)
+
+API keys have the form `sb_<orgid>_<secret>`; the org prefix is only a routing
+hint (the router demultiplexes by it), while the org child verifies the secret
+against its own org DB. Only a SHA-256 hash of the secret is stored
+(`apikey.HashSecret`); the plaintext is printed exactly once by `key add` and
+never persisted. Revoked keys stay in the org DB and fail closed at auth time.
+Auth failures are rate-limited per key prefix and source address, and only the
+key prefix (`sb_<orgid>`) is ever logged.
+
+```bash
+switchboard-admin key add -org acme -username alice -label ci   # prints the full key once
+switchboard-admin key list -org acme
+switchboard-admin key revoke -org acme -id 1
+```

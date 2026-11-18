@@ -28,3 +28,27 @@ func TestNewRejectsBadOrg(t *testing.T) {
 		t.Fatal("expected error for invalid org id")
 	}
 }
+
+func TestHashSecret(t *testing.T) {
+	key, err := New("acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secret, _ := Parse(key)
+	h1 := HashSecret(secret)
+	if h1 == secret || len(h1) != 64 {
+		t.Fatalf("HashSecret must be a sha-256 hex digest, got %q", h1)
+	}
+	if HashSecret(secret) != h1 {
+		t.Fatal("HashSecret not deterministic")
+	}
+	if HashSecret("other") == h1 {
+		t.Fatal("HashSecret collision for different secrets")
+	}
+}
+
+func TestPrefix(t *testing.T) {
+	if Prefix("acme") != "sb_acme" {
+		t.Fatalf("Prefix(acme) = %q", Prefix("acme"))
+	}
+}

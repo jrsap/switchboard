@@ -7,25 +7,39 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/jrsap/switchboard/internal/apikey"
 	"github.com/jrsap/switchboard/internal/orgdb"
 	"github.com/jrsap/switchboard/internal/seal"
+)
+
+const (
+	defaultAuthFailureLimit  = 10
+	defaultAuthFailureWindow = time.Minute
 )
 
 type Server struct {
 	orgID      string
 	spawnToken string
 	db         *orgdb.DB
+	failures   *failureLimiter
 
 	mu      sync.RWMutex
 	dataKey []byte // unwrapped org data key, memory only, received via handshake
 }
 
 func New(orgID, spawnToken string, db *orgdb.DB) *Server {
-	return &Server{orgID: orgID, spawnToken: spawnToken, db: db}
+	return &Server{
+		orgID:      orgID,
+		spawnToken: spawnToken,
+		db:         db,
+		failures:   newFailureLimiter(defaultAuthFailureLimit, defaultAuthFailureWindow),
+	}
 }
 
 func (s *Server) Ready() bool {
@@ -86,13 +100,68 @@ func (s *Server) handshake(w http.ResponseWriter, r *http.Request) {
 }
 
 // gate serves everything else: 503 until the handshake delivered the data
-// key, then 404 (the org API endpoints land here later).
+// key, then the org API: requests must carry a valid, non-revoked API key of
+// THIS org (verified as a SHA-256 hash against the org DB with a
+// constant-time comparison; a key with another org's prefix fails closed).
+// Auth failures are rate-limited per key prefix and source address; only the
+// key prefix is ever logged. Authenticated requests hit 404 until the org API
+// endpoints land here later.
 func (s *Server) gate(w http.ResponseWriter, r *http.Request) {
 	if !s.Ready() {
 		writeError(w, http.StatusServiceUnavailable, "org child is starting", "server_error")
 		return
 	}
+
+	auth := r.Header.Get("Authorization")
+	key, ok := strings.CutPrefix(auth, "Bearer ")
+	if !ok || key == auth {
+		s.authFailed(w, r, "missing or malformed Authorization header")
+		return
+	}
+	orgID, secret, ok := apikey.Parse(key)
+	if !ok {
+		s.authFailed(w, r, "invalid api key")
+		return
+	}
+	source := r.RemoteAddr
+	if !s.failures.allow(apikey.Prefix(orgID) + "|" + source) {
+		writeError(w, http.StatusTooManyRequests, "too many auth failures; retry later", "rate_limited")
+		return
+	}
+	if orgID != s.orgID {
+		s.authFailed(w, r, "invalid api key")
+		return
+	}
+	hash := apikey.HashSecret(secret)
+	stored, err := s.db.GetAPIKeyByHash(hash)
+	if err != nil {
+		s.authFailed(w, r, "invalid api key")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(stored.SecretHash), []byte(hash)) != 1 {
+		s.authFailed(w, r, "invalid api key")
+		return
+	}
+	if stored.Revoked() {
+		s.authFailed(w, r, "invalid api key")
+		return
+	}
 	writeError(w, http.StatusNotFound, "not found", "not_found")
+}
+
+// authFailed records the failure for rate limiting, logs only the key
+// prefix (never the secret) and writes a 401.
+func (s *Server) authFailed(w http.ResponseWriter, r *http.Request, message string) {
+	auth := r.Header.Get("Authorization")
+	prefix := ""
+	if key, ok := strings.CutPrefix(auth, "Bearer "); ok {
+		if orgID, _, ok := apikey.Parse(key); ok {
+			prefix = apikey.Prefix(orgID)
+		}
+	}
+	s.failures.record(prefix + "|" + r.RemoteAddr)
+	log.Printf("child %s: auth failed: key prefix %q from %s", s.orgID, prefix, r.RemoteAddr)
+	writeError(w, http.StatusUnauthorized, message, "invalid_api_key")
 }
 
 func writeError(w http.ResponseWriter, status int, message, typ string) {

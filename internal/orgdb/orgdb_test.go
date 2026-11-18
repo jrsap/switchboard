@@ -250,3 +250,61 @@ func TestNormalizeReasoningLevels(t *testing.T) {
 		t.Fatal("empty level accepted")
 	}
 }
+
+func TestAPIKeys(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	m, err := db.AddMember("alice", "admin")
+	if err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	if _, err := db.AddAPIKey(m.ID, "ci", "hash1"); err != nil {
+		t.Fatalf("AddAPIKey: %v", err)
+	}
+	if _, err := db.AddAPIKey(m.ID, "", "hash2"); err != nil {
+		t.Fatalf("AddAPIKey empty label: %v", err)
+	}
+	if _, err := db.AddAPIKey(m.ID, "dup", "hash1"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate hash: want ErrConflict, got %v", err)
+	}
+	if _, err := db.AddAPIKey(999, "x", "hash3"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown member: want ErrNotFound, got %v", err)
+	}
+	if _, err := db.AddAPIKey(m.ID, "x", ""); err == nil {
+		t.Fatal("empty hash accepted")
+	}
+
+	keys, err := db.ListAPIKeys()
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	if len(keys) != 2 || keys[0].Label != "ci" || keys[1].Label != "" || keys[0].Username != "alice" {
+		t.Fatalf("unexpected keys: %+v", keys)
+	}
+	if keys[0].CreatedAt.IsZero() || keys[0].Revoked() {
+		t.Fatalf("unexpected key fields: %+v", keys[0])
+	}
+
+	got, err := db.GetAPIKeyByHash("hash2")
+	if err != nil || got.ID != keys[1].ID {
+		t.Fatalf("GetAPIKeyByHash = %+v, %v", got, err)
+	}
+	if _, err := db.GetAPIKeyByHash("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+
+	if err := db.RevokeAPIKey(keys[0].ID); err != nil {
+		t.Fatalf("RevokeAPIKey: %v", err)
+	}
+	revoked, err := db.GetAPIKeyByID(keys[0].ID)
+	if err != nil || !revoked.Revoked() || revoked.RevokedAt == nil {
+		t.Fatalf("revoked key: %+v, %v", revoked, err)
+	}
+	if err := db.RevokeAPIKey(keys[0].ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("double revoke: want ErrNotFound, got %v", err)
+	}
+	if err := db.RevokeAPIKey(999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown key revoke: want ErrNotFound, got %v", err)
+	}
+}

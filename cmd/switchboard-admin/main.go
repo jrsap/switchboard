@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 	_ "modernc.org/sqlite"
 
+	"github.com/jrsap/switchboard/internal/apikey"
 	"github.com/jrsap/switchboard/internal/config"
 	"github.com/jrsap/switchboard/internal/database"
 	"github.com/jrsap/switchboard/internal/globaldb"
@@ -85,6 +86,8 @@ func main() {
 		err = providerCommand(*configPath, *dataDir, args[1:])
 	case "model":
 		err = modelCommand(*configPath, *dataDir, args[1:])
+	case "key":
+		err = keyCommand(*dataDir, args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -113,12 +116,19 @@ Commands:
   model add -org ORG -provider NAME -name NAME [-tool-calling] [-vision] [-reasoning-level LEVEL]...
   model list -org ORG [-provider NAME]
   model delete -org ORG -provider NAME -name NAME
+  key add -org ORG -username NAME [-label LABEL]
+  key list -org ORG
+  key revoke -org ORG -id ID
 
 Orgs are not entries in the router config: an org exists iff its org DB exists at
 <data-dir>/<org>/org.db, and org/provider/model commands locate it there (restart the
 router to pick up a newly added org). Provider API keys are stored sealed with the
 org data key; -tool-calling / -vision are manual checkboxes and -reasoning-level is
 repeatable (the model's supported reasoning levels).
+
+API keys have the form sb_<orgid>_<secret>; only a SHA-256 hash of the secret is stored in the
+org DB and key add prints the full key exactly once. Revoked keys stay in the org DB and fail
+closed at auth time.
 
 The router config defaults to SWITCHBOARD_CONFIG or ./config.json. The global database
 path and per-org data dir resolve as: flag > env (SWITCHBOARD_GLOBAL_DB /
@@ -248,6 +258,127 @@ func openOrg(configPath, dataDir, orgID string) (*orgdb.DB, []byte, error) {
 		return nil, nil, fmt.Errorf("unwrap data key of org %q: %w", orgID, err)
 	}
 	return odb, dataKey, nil
+}
+
+// keyCommand manages an org's API keys. It only touches the org DB: key
+// secrets are hashed (SHA-256) before storage and never sealed with the
+// data key, so no router config / root key is needed here.
+func keyCommand(dataDir string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("key: missing subcommand (add, list, revoke)")
+	}
+	switch args[0] {
+	case "add":
+		return keyAdd(dataDir, args[1:])
+	case "list":
+		return keyList(dataDir, args[1:])
+	case "revoke":
+		return keyRevoke(dataDir, args[1:])
+	default:
+		return fmt.Errorf("key: unknown subcommand %q", args[0])
+	}
+}
+
+func openOrgKeys(dataDir, orgID string) (*orgdb.DB, error) {
+	odb, err := orgs.OpenOrgDB(dataDir, orgID, openOrgSQL)
+	if err != nil {
+		return nil, err
+	}
+	return odb, nil
+}
+
+func keyAdd(dataDir string, args []string) error {
+	fs := flag.NewFlagSet("key add", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	username := fs.String("username", "", "owning member username (required)")
+	label := fs.String("label", "", "optional label, e.g. \"ci\"")
+	fs.Parse(args)
+	if *orgID == "" || *username == "" {
+		return errors.New("key add: -org and -username are required")
+	}
+	odb, err := openOrgKeys(dataDir, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	member, err := odb.GetMemberByUsername(*username)
+	if errors.Is(err, orgdb.ErrNotFound) {
+		return fmt.Errorf("member %q not found in org %q", *username, *orgID)
+	}
+	if err != nil {
+		return err
+	}
+	key, err := apikey.New(*orgID)
+	if err != nil {
+		return err
+	}
+	_, secret, _ := apikey.Parse(key)
+	k, err := odb.AddAPIKey(member.ID, *label, apikey.HashSecret(secret))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created api key (id %d) for %q in org %q\n  label:     %s\n  username:  %s\n  API key:   %s\nThis is the only time the full key is shown; store it now (only its SHA-256 hash is stored).\n",
+		k.ID, *username, *orgID, k.Label, k.Username, key)
+	return nil
+}
+
+func keyList(dataDir string, args []string) error {
+	fs := flag.NewFlagSet("key list", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	fs.Parse(args)
+	if *orgID == "" {
+		return errors.New("key list: -org is required")
+	}
+	odb, err := openOrgKeys(dataDir, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	keys, err := odb.ListAPIKeys()
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tUSERNAME\tLABEL\tSTATUS\tCREATED\tREVOKED")
+	for _, k := range keys {
+		status := "active"
+		revoked := "-"
+		if k.Revoked() {
+			status = "revoked"
+			revoked = k.RevokedAt.Format("2006-01-02 15:04:05")
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", k.ID, k.Username, k.Label, status, k.CreatedAt.Format("2006-01-02 15:04:05"), revoked)
+	}
+	return w.Flush()
+}
+
+func keyRevoke(dataDir string, args []string) error {
+	fs := flag.NewFlagSet("key revoke", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	id := fs.Int64("id", 0, "key id (required)")
+	fs.Parse(args)
+	if *orgID == "" || *id == 0 {
+		return errors.New("key revoke: -org and -id are required")
+	}
+	odb, err := openOrgKeys(dataDir, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	if _, err := odb.GetAPIKeyByID(*id); err != nil {
+		if errors.Is(err, orgdb.ErrNotFound) {
+			return fmt.Errorf("key id %d not found in org %q", *id, *orgID)
+		}
+		return err
+	}
+	if err := odb.RevokeAPIKey(*id); err != nil {
+		if errors.Is(err, orgdb.ErrNotFound) {
+			return fmt.Errorf("key id %d is already revoked in org %q", *id, *orgID)
+		}
+		return err
+	}
+	fmt.Printf("revoked api key id %d in org %q\n", *id, *orgID)
+	return nil
 }
 
 func keyStatus(sealed string) string {

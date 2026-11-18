@@ -122,6 +122,10 @@ func (db *DB) AddMember(username, role string) (*Member, error) {
 	return db.GetMemberByUsername(username)
 }
 
+func (db *DB) GetMemberByID(id int64) (*Member, error) {
+	return db.scanMember(db.sql.QueryRow(db.q.getMemberByID, id))
+}
+
 func (db *DB) GetMemberByUsername(username string) (*Member, error) {
 	return db.scanMember(db.sql.QueryRow(db.q.getMemberByName, username))
 }
@@ -141,6 +145,120 @@ func (db *DB) ListMembers() ([]*Member, error) {
 		members = append(members, m)
 	}
 	return members, rows.Err()
+}
+
+// APIKey is a row of the api_keys table. Only the SHA-256 hash of the
+// secret is stored (secret_hash); the plaintext is printed exactly once by
+// the admin CLI at creation and never persisted. RevokedAt is nil while
+// the key is active.
+type APIKey struct {
+	ID         int64
+	MemberID   int64
+	Username   string
+	Label      string
+	SecretHash string
+	CreatedAt  time.Time
+	RevokedAt  *time.Time
+}
+
+func (k *APIKey) Revoked() bool {
+	return k.RevokedAt != nil
+}
+
+func (db *DB) scanAPIKey(row interface{ Scan(...any) error }) (*APIKey, error) {
+	var k APIKey
+	var createdAt int64
+	var revokedAt sql.NullInt64
+	err := row.Scan(&k.ID, &k.MemberID, &k.Username, &k.Label, &k.SecretHash, &createdAt, &revokedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	k.CreatedAt = time.Unix(0, createdAt).UTC()
+	if revokedAt.Valid {
+		t := time.Unix(0, revokedAt.Int64).UTC()
+		k.RevokedAt = &t
+	}
+	return &k, nil
+}
+
+// AddAPIKey inserts a key owned by an existing member. secretHash is the
+// already-computed SHA-256 hex of the secret (apikey.HashSecret); this
+// package never sees the plaintext.
+func (db *DB) AddAPIKey(memberID int64, label, secretHash string) (*APIKey, error) {
+	if secretHash == "" {
+		return nil, errors.New("orgdb: secret hash must not be empty")
+	}
+	if _, err := db.GetMemberByID(memberID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("orgdb: member id %d: %w", memberID, ErrNotFound)
+		}
+		return nil, err
+	}
+	res, err := db.sql.Exec(db.q.addAPIKey, memberID, label, secretHash, time.Now().UnixNano())
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return nil, fmt.Errorf("orgdb: api key: %w", ErrConflict)
+		}
+		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+			return nil, fmt.Errorf("orgdb: member id %d: %w", memberID, ErrNotFound)
+		}
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return db.GetAPIKeyByID(id)
+}
+
+func (db *DB) GetAPIKeyByID(id int64) (*APIKey, error) {
+	row := db.sql.QueryRow(`SELECT k.id, k.member_id, m.username, k.label, k.secret_hash, k.created_at, k.revoked_at
+	                        FROM api_keys k JOIN members m ON m.id = k.member_id WHERE k.id = ?`, id)
+	return db.scanAPIKey(row)
+}
+
+// GetAPIKeyByHash looks a key up by the SHA-256 hex of its secret. Used by
+// the child's auth middleware; the caller still does the constant-time
+// comparison of the hashes.
+func (db *DB) GetAPIKeyByHash(secretHash string) (*APIKey, error) {
+	return db.scanAPIKey(db.sql.QueryRow(db.q.getAPIKeyByHash, secretHash))
+}
+
+func (db *DB) ListAPIKeys() ([]*APIKey, error) {
+	rows, err := db.sql.Query(db.q.listAPIKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []*APIKey
+	for rows.Next() {
+		k, err := db.scanAPIKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// RevokeAPIKey marks a key revoked; it stays in the table and fails closed
+// at auth time. Revoking an already-revoked key returns ErrNotFound.
+func (db *DB) RevokeAPIKey(id int64) error {
+	res, err := db.sql.Exec(db.q.revokeAPIKey, time.Now().UnixNano(), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 var (
