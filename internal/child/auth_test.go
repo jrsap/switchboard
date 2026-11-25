@@ -57,7 +57,7 @@ func requestWithKey(method, path, key string) *http.Request {
 func TestValidKeyAuthenticates(t *testing.T) {
 	_, h, key := readyServer(t)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, requestWithKey(http.MethodGet, "/v1/models", key))
+	h.ServeHTTP(rr, requestWithKey(http.MethodPost, "/v1/chat/completions", key))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("valid key: %d %s, want 404 (authenticated, endpoint not implemented yet)", rr.Code, rr.Body.String())
 	}
@@ -67,6 +67,12 @@ func TestValidKeyAuthenticates(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "not_found") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+	// GET /v1/models is implemented and returns the (empty) alias catalog.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, requestWithKey(http.MethodGet, "/v1/models", key))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid key on /v1/models: %d %s, want 200", rr.Code, rr.Body.String())
 	}
 }
 
@@ -85,7 +91,7 @@ func TestWrongOrgKeyFailsClosed(t *testing.T) {
 	}
 	// The valid acme key still works after the wrong-org failures.
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, requestWithKey(http.MethodGet, "/v1/models", key))
+	h.ServeHTTP(rr, requestWithKey(http.MethodPost, "/v1/chat/completions", key))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("valid key after wrong-org failures: %d, want 404", rr.Code)
 	}
@@ -152,7 +158,7 @@ func TestAuthFailureRateLimit(t *testing.T) {
 		t.Fatalf("valid key from limited source: %d, want 429", rr.Code)
 	}
 	// A different source is not affected.
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer "+validKey)
 	req.RemoteAddr = "192.0.2.9:9999"
 	rr = httptest.NewRecorder()

@@ -1,7 +1,7 @@
 // Command switchboard-admin is the admin CLI. It manages users in the
 // global database, orgs (router config + per-org DB bootstrap), and the
-// per-org providers and upstream models; keys, quotas and aliases come
-// later.
+// per-org providers, upstream models, API keys and model aliases; quotas
+// and the activity log come later.
 package main
 
 import (
@@ -88,6 +88,8 @@ func main() {
 		err = modelCommand(*configPath, *dataDir, args[1:])
 	case "key":
 		err = keyCommand(*dataDir, args[1:])
+	case "alias":
+		err = aliasCommand(*dataDir, args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -119,6 +121,9 @@ Commands:
   key add -org ORG -username NAME [-label LABEL]
   key list -org ORG
   key revoke -org ORG -id ID
+  alias add -org ORG -name NAME -entry PROVIDER/MODEL...
+  alias list -org ORG
+  alias delete -org ORG -name NAME
 
 Orgs are not entries in the router config: an org exists iff its org DB exists at
 <data-dir>/<org>/org.db, and org/provider/model commands locate it there (restart the
@@ -129,6 +134,10 @@ repeatable (the model's supported reasoning levels).
 API keys have the form sb_<orgid>_<secret>; only a SHA-256 hash of the secret is stored in the
 org DB and key add prints the full key exactly once. Revoked keys stay in the org DB and fail
 closed at auth time.
+
+Aliases are the model names the org's API exposes (GET /v1/models): each alias maps to an ordered
+list of -entry PROVIDER/MODEL values tried in order (failover). Every entry must reference an
+existing provider and upstream model; a provider or model referenced by an alias cannot be deleted.
 
 The router config defaults to SWITCHBOARD_CONFIG or ./config.json. The global database
 path and per-org data dir resolve as: flag > env (SWITCHBOARD_GLOBAL_DB /
@@ -378,6 +387,101 @@ func keyRevoke(dataDir string, args []string) error {
 		return err
 	}
 	fmt.Printf("revoked api key id %d in org %q\n", *id, *orgID)
+	return nil
+}
+
+// aliasCommand manages an org's model aliases. It only touches the org DB:
+// no sealing is involved, so no router config / root key is needed here.
+func aliasCommand(dataDir string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("alias: missing subcommand (add, list, delete)")
+	}
+	switch args[0] {
+	case "add":
+		return aliasAdd(dataDir, args[1:])
+	case "list":
+		return aliasList(dataDir, args[1:])
+	case "delete":
+		return aliasDelete(dataDir, args[1:])
+	default:
+		return fmt.Errorf("alias: unknown subcommand %q", args[0])
+	}
+}
+
+func aliasAdd(dataDir string, args []string) error {
+	fs := flag.NewFlagSet("alias add", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	name := fs.String("name", "", "alias name exposed as the model id (required)")
+	var entries stringSlice
+	fs.Var(&entries, "entry", "failover entry PROVIDER/MODEL, repeatable; order is preserved (required)")
+	fs.Parse(args)
+	if *orgID == "" || *name == "" || len(entries) == 0 {
+		return errors.New("alias add: -org, -name and at least one -entry are required")
+	}
+	odb, err := openOrgKeys(dataDir, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	a, err := odb.AddAlias(*name, entries)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created alias %q (id %d) in org %q\n  entries (failover order):\n", a.Name, a.ID, *orgID)
+	for _, e := range a.Entries {
+		fmt.Printf("    %d. %s\n", e.Position, e)
+	}
+	return nil
+}
+
+func aliasList(dataDir string, args []string) error {
+	fs := flag.NewFlagSet("alias list", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	fs.Parse(args)
+	if *orgID == "" {
+		return errors.New("alias list: -org is required")
+	}
+	odb, err := openOrgKeys(dataDir, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	aliases, err := odb.ListAliases()
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tENTRIES (FAILOVER ORDER)\tCREATED")
+	for _, a := range aliases {
+		entries := make([]string, 0, len(a.Entries))
+		for _, e := range a.Entries {
+			entries = append(entries, e.String())
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", a.ID, a.Name, strings.Join(entries, ", "), a.CreatedAt.Format("2006-01-02 15:04:05"))
+	}
+	return w.Flush()
+}
+
+func aliasDelete(dataDir string, args []string) error {
+	fs := flag.NewFlagSet("alias delete", flag.ExitOnError)
+	orgID := fs.String("org", "", "org id (required)")
+	name := fs.String("name", "", "alias name (required)")
+	fs.Parse(args)
+	if *orgID == "" || *name == "" {
+		return errors.New("alias delete: -org and -name are required")
+	}
+	odb, err := openOrgKeys(dataDir, *orgID)
+	if err != nil {
+		return err
+	}
+	defer odb.Close()
+	if err := odb.DeleteAlias(*name); err != nil {
+		if errors.Is(err, orgdb.ErrNotFound) {
+			return fmt.Errorf("alias %q not found in org %q", *name, *orgID)
+		}
+		return err
+	}
+	fmt.Printf("deleted alias %q in org %q\n", *name, *orgID)
 	return nil
 }
 

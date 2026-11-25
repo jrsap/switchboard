@@ -104,8 +104,8 @@ func (s *Server) handshake(w http.ResponseWriter, r *http.Request) {
 // THIS org (verified as a SHA-256 hash against the org DB with a
 // constant-time comparison; a key with another org's prefix fails closed).
 // Auth failures are rate-limited per key prefix and source address; only the
-// key prefix is ever logged. Authenticated requests hit 404 until the org API
-// endpoints land here later.
+// key prefix is ever logged. Authenticated requests are dispatched to the
+// org API endpoints.
 func (s *Server) gate(w http.ResponseWriter, r *http.Request) {
 	if !s.Ready() {
 		writeError(w, http.StatusServiceUnavailable, "org child is starting", "server_error")
@@ -146,7 +146,39 @@ func (s *Server) gate(w http.ResponseWriter, r *http.Request) {
 		s.authFailed(w, r, "invalid api key")
 		return
 	}
-	writeError(w, http.StatusNotFound, "not found", "not_found")
+	s.api(w, r)
+}
+
+// api dispatches an authenticated request to the org API endpoints.
+func (s *Server) api(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+		s.models(w, r)
+	default:
+		writeError(w, http.StatusNotFound, "not found", "not_found")
+	}
+}
+
+// models serves GET /v1/models: the org's alias catalog in the OpenAI
+// models response shape. No upstream calls; the alias name is the model id.
+func (s *Server) models(w http.ResponseWriter, r *http.Request) {
+	aliases, err := s.db.ListAliases()
+	if err != nil {
+		log.Printf("child %s: list aliases: %v", s.orgID, err)
+		writeError(w, http.StatusInternalServerError, "internal error", "server_error")
+		return
+	}
+	data := make([]map[string]any, 0, len(aliases))
+	for _, a := range aliases {
+		data = append(data, map[string]any{
+			"object":   "model",
+			"id":       a.Name,
+			"created":  a.CreatedAt.Unix(),
+			"owned_by": s.orgID,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 }
 
 // authFailed records the failure for rate limiting, logs only the key

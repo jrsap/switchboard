@@ -308,3 +308,136 @@ func TestAPIKeys(t *testing.T) {
 		t.Fatalf("unknown key revoke: want ErrNotFound, got %v", err)
 	}
 }
+
+func TestAliases(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	p1, err := db.AddProvider("openai", "https://api.openai.com/v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := db.AddProvider("anthropic", "https://api.anthropic.com/v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddModel(p1.ID, "gpt-4o", true, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddModel(p1.ID, "gpt-4o-mini", false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddModel(p2.ID, "claude-sonnet", true, true, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalid names, empty entry list, malformed entries.
+	if _, err := db.AddAlias("bad name!", []string{"openai/gpt-4o"}); err == nil {
+		t.Fatal("invalid alias name accepted")
+	}
+	if _, err := db.AddAlias("big", nil); err == nil {
+		t.Fatal("empty entry list accepted")
+	}
+	if _, err := db.AddAlias("big", []string{"openai"}); err == nil {
+		t.Fatal("entry without model accepted")
+	}
+	if _, err := db.AddAlias("big", []string{"/gpt-4o"}); err == nil {
+		t.Fatal("entry without provider accepted")
+	}
+
+	// Entries must reference existing providers and models.
+	if _, err := db.AddAlias("big", []string{"nope/gpt-4o"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown provider: want ErrNotFound, got %v", err)
+	}
+	if _, err := db.AddAlias("big", []string{"openai/nope"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown model: want ErrNotFound, got %v", err)
+	}
+	if _, err := db.AddAlias("big", []string{"anthropic/gpt-4o"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("model on wrong provider: want ErrNotFound, got %v", err)
+	}
+
+	// Duplicate entries are rejected.
+	if _, err := db.AddAlias("big", []string{"openai/gpt-4o", "openai/gpt-4o"}); err == nil {
+		t.Fatal("duplicate entry accepted")
+	}
+
+	// Happy path: order is preserved as failover order.
+	big, err := db.AddAlias("big", []string{"openai/gpt-4o", "anthropic/claude-sonnet", "openai/gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("AddAlias: %v", err)
+	}
+	if big.Name != "big" || big.CreatedAt.IsZero() || len(big.Entries) != 3 {
+		t.Fatalf("unexpected alias: %+v", big)
+	}
+	want := []string{"openai/gpt-4o", "anthropic/claude-sonnet", "openai/gpt-4o-mini"}
+	for i, e := range big.Entries {
+		if e.Position != i || e.String() != want[i] {
+			t.Fatalf("entry %d: %+v, want position %d %q", i, e, i, want[i])
+		}
+	}
+	if _, err := db.AddAlias("big", []string{"openai/gpt-4o"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate alias: want ErrConflict, got %v", err)
+	}
+
+	// A model name may contain "/"; the cut is at the first "/".
+	if _, err := db.AddModel(p1.ID, "org/team/model", false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	slash, err := db.AddAlias("slashy", []string{"openai/org/team/model"})
+	if err != nil {
+		t.Fatalf("AddAlias with slash in model name: %v", err)
+	}
+	if len(slash.Entries) != 1 || slash.Entries[0].String() != "openai/org/team/model" {
+		t.Fatalf("slash entry: %+v", slash.Entries)
+	}
+
+	// Lookups and listing.
+	got, err := db.GetAliasByName("big")
+	if err != nil || got.ID != big.ID || len(got.Entries) != 3 {
+		t.Fatalf("GetAliasByName = %+v, %v", got, err)
+	}
+	gotByID, err := db.GetAliasByID(big.ID)
+	if err != nil || gotByID.Name != "big" || gotByID.Entries[1].String() != "anthropic/claude-sonnet" {
+		t.Fatalf("GetAliasByID = %+v, %v", gotByID, err)
+	}
+	if _, err := db.GetAliasByName("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	all, err := db.ListAliases()
+	if err != nil || len(all) != 2 || all[0].Name != "big" || all[1].Name != "slashy" {
+		t.Fatalf("ListAliases = %+v, %v", all, err)
+	}
+	if len(all[0].Entries) != 3 || all[0].Entries[0].Position != 0 || all[0].Entries[2].Position != 2 {
+		t.Fatalf("ListAliases entry order: %+v", all[0].Entries)
+	}
+
+	// Providers/models referenced by an alias cannot be deleted.
+	if err := db.DeleteProvider(p1.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeleteProvider referenced: want ErrConflict, got %v", err)
+	}
+	if err := db.DeleteModel(p2.ID, "claude-sonnet"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeleteModel referenced: want ErrConflict, got %v", err)
+	}
+
+	// Delete removes the alias and cascades to its entries.
+	if err := db.DeleteAlias("big"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetAliasByName("big"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("after delete: want ErrNotFound, got %v", err)
+	}
+	if err := db.DeleteAlias("big"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("double delete: want ErrNotFound, got %v", err)
+	}
+	// Now the providers/models can be deleted once no alias references them.
+	if err := db.DeleteAlias("slashy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteProvider(p1.ID); err != nil {
+		t.Fatalf("DeleteProvider after alias deletes: %v", err)
+	}
+	all, err = db.ListAliases()
+	if err != nil || len(all) != 0 {
+		t.Fatalf("ListAliases after deletes = %+v, %v", all, err)
+	}
+}

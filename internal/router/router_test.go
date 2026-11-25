@@ -328,14 +328,15 @@ func TestKeysVerifiedAgainstOrgDB(t *testing.T) {
 	betaKey := makeKey(t, betaDB, "beta", "bob")
 
 	do := func(key string) int {
-		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		req.Header.Set("Authorization", "Bearer "+key)
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, req)
 		return rr.Code
 	}
 
-	// Valid key: through the router, past child auth, into the org API.
+	// Valid key: through the router, past child auth, into the org API
+	// (chat completions is not implemented yet, so 404 past auth).
 	if code := do(acmeKey); code != http.StatusNotFound {
 		t.Fatalf("valid acme key: %d, want 404 (past auth)", code)
 	}
