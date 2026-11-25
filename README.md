@@ -49,6 +49,7 @@ for a complete sample. Orgs are discovered from their per-org databases under
 ```bash
 go build ./...
 cp config.example.json config.json   # set root_key (base64 32 bytes); global_db / data_dir are CLI defaults
+./switchboard-admin init             # create + migrate the global database (idempotent, safe to re-run)
 
 # create an org: creates <data-dir>/acme/ (org DB with wrapped data key + org name,
 # archive dir, one admin user). The config file is NOT modified; the router

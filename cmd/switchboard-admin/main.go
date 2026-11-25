@@ -78,6 +78,8 @@ func main() {
 
 	var err error
 	switch args[0] {
+	case "init":
+		err = initCommand(*dbPath)
 	case "user":
 		err = userCommand(*dbPath, args[1:])
 	case "org":
@@ -104,6 +106,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: switchboard-admin [-db PATH] [-config PATH] [-data-dir DIR] <command> [flags]
 
 Commands:
+  init                           initialize the global database file (create + migrate; idempotent)
   user add -username NAME [-password PASS] [-org ORG]...
   user list
   user show -username NAME
@@ -742,6 +745,53 @@ func userCommand(dbPath string, args []string) error {
 	default:
 		return fmt.Errorf("user: unknown subcommand %q", args[0])
 	}
+}
+
+// initCommand initializes the global database file: it creates the file and
+// its parent directory if missing, then applies any pending migrations.
+// Re-running it on an existing database migrates it in place (already-applied
+// migrations are skipped), so it is safe to run at every deployment. Per-org
+// databases are not touched here: they are created by org add and migrated
+// whenever they are opened.
+func initCommand(dbPath string) error {
+	existed := true
+	if _, err := os.Stat(dbPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		existed = false
+	}
+	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create database directory %s: %w", dir, err)
+		}
+	}
+	sqlDB, err := sql.Open("sqlite", database.SQLiteDSN(dbPath))
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+	before, err := database.AppliedMigrations(sqlDB)
+	if err != nil {
+		return err
+	}
+	if _, err := globaldb.Open(sqlDB); err != nil {
+		return err
+	}
+	after, err := database.AppliedMigrations(sqlDB)
+	if err != nil {
+		return err
+	}
+	abs, _ := filepath.Abs(dbPath)
+	switch {
+	case !existed:
+		fmt.Printf("initialized global database at %s (created, %d migration(s) applied)\n", abs, after)
+	case after > before:
+		fmt.Printf("migrated global database at %s (%d new migration(s) applied, now at %d)\n", abs, after-before, after)
+	default:
+		fmt.Printf("global database at %s already up to date (%d migration(s))\n", abs, after)
+	}
+	return nil
 }
 
 func openGlobalDB(path string) (*globaldb.DB, error) {
