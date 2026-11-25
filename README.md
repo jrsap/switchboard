@@ -64,6 +64,11 @@ cp config.example.json config.json   # set root_key (base64 32 bytes); global_db
 ./switchboard-admin model add -org acme -provider openai -name gpt-4o -tool-calling -vision -reasoning-level low -reasoning-level high
 ./switchboard-admin model list -org acme
 
+# define the public model names the org's API exposes (GET /v1/models): each alias maps to an
+# ordered failover list of provider/model entries, tried in order until one succeeds
+./switchboard-admin alias add -org acme -name big -entry openai/gpt-4o
+./switchboard-admin alias list -org acme
+
 # manage org API keys (sb_<orgid>_<secret>): only a SHA-256 hash of the secret
 # is stored; `key add` prints the full key exactly once
 ./switchboard-admin key add -org acme -username alice -label ci
