@@ -8,4 +8,5 @@ config.json
 *.egg-info/
 /switchboard
 /switchboard-admin
+/bin/
 /data/

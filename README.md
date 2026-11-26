@@ -47,37 +47,37 @@ for a complete sample. Orgs are discovered from their per-org databases under
 ## Quickstart
 
 ```bash
-go build ./...
+make                          # builds ./bin/switchboard, ./bin/switchboard-admin, ./bin/switchboard-org
 cp config.example.json config.json   # set root_key (base64 32 bytes); global_db / data_dir are CLI defaults
-./switchboard-admin init             # create + migrate the global database (idempotent, safe to re-run)
+./bin/switchboard-admin init             # create + migrate the global database (idempotent, safe to re-run)
 
 # create an org: creates <data-dir>/acme/ (org DB with wrapped data key + org name,
 # archive dir, one admin user). The config file is NOT modified; the router
 # discovers the org from its org DB. Restart the router to spawn its child.
-./switchboard-admin org add -id acme -name "Acme Corp" -admin-username alice
-./switchboard-admin org list
+./bin/switchboard-admin org add -id acme -name "Acme Corp" -admin-username alice
+./bin/switchboard-admin org list
 
 # manage users in the global DB
-./switchboard-admin user list
+./bin/switchboard-admin user list
 
 # configure providers and upstream models for an org (stored in the org DB)
-./switchboard-admin provider add -org acme -name openai -base-url https://api.openai.com/v1 -api-key sk-...
-./switchboard-admin model add -org acme -provider openai -name gpt-4o -tool-calling -vision -reasoning-level low -reasoning-level high
-./switchboard-admin model list -org acme
+./bin/switchboard-admin provider add -org acme -name openai -base-url https://api.openai.com/v1 -api-key sk-...
+./bin/switchboard-admin model add -org acme -provider openai -name gpt-4o -tool-calling -vision -reasoning-level low -reasoning-level high
+./bin/switchboard-admin model list -org acme
 
 # define the public model names the org's API exposes (GET /v1/models): each alias maps to an
 # ordered failover list of provider/model entries, tried in order until one succeeds
-./switchboard-admin alias add -org acme -name big -entry openai/gpt-4o
-./switchboard-admin alias list -org acme
+./bin/switchboard-admin alias add -org acme -name big -entry openai/gpt-4o
+./bin/switchboard-admin alias list -org acme
 
 # manage org API keys (sb_<orgid>_<secret>): only a SHA-256 hash of the secret
 # is stored; `key add` prints the full key exactly once
-./switchboard-admin key add -org acme -username alice -label ci
-./switchboard-admin key list -org acme
-./switchboard-admin key revoke -org acme -id 1
+./bin/switchboard-admin key add -org acme -username alice -label ci
+./bin/switchboard-admin key list -org acme
+./bin/switchboard-admin key revoke -org acme -id 1
 
 # run the router; it spawns one switchboard-org child per org
-./switchboard -config config.json
+./bin/switchboard -config config.json
 ```
 
 API keys are structured as `sb_<orgid>_<secret>`; the org prefix is only a routing hint,
