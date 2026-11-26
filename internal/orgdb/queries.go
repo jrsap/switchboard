@@ -25,6 +25,14 @@ type queries struct {
 	getAPIKeyByHash string
 	listAPIKeys     string
 	revokeAPIKey    string
+
+	addAlias         string
+	addAliasEntry    string
+	getAliasByName   string
+	getAliasByID     string
+	listAliases      string
+	listAliasEntries string
+	deleteAlias      string
 }
 
 var sqliteQueries = queries{
@@ -63,4 +71,17 @@ var sqliteQueries = queries{
 	             WHERE m.provider_id = ?
 	             ORDER BY m.name`,
 	deleteModel: `DELETE FROM models WHERE provider_id = ? AND name = ?`,
+
+	addAlias:       `INSERT INTO aliases (name, created_at) VALUES (?, ?)`,
+	addAliasEntry:  `INSERT INTO alias_entries (alias_id, position, provider_id, model_id) VALUES (?, ?, ?, ?)`,
+	getAliasByName: `SELECT id, name, created_at FROM aliases WHERE name = ?`,
+	getAliasByID:   `SELECT id, name, created_at FROM aliases WHERE id = ?`,
+	listAliases:    `SELECT id, name, created_at FROM aliases ORDER BY name`,
+	listAliasEntries: `SELECT e.position, e.provider_id, p.name, e.model_id, m.name
+	                   FROM alias_entries e
+	                   JOIN providers p ON p.id = e.provider_id
+	                   JOIN models m ON m.id = e.model_id
+	                   WHERE e.alias_id = ?
+	                   ORDER BY e.position`,
+	deleteAlias: `DELETE FROM aliases WHERE name = ?`,
 }

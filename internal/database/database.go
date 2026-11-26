@@ -14,6 +14,20 @@ import (
 	"time"
 )
 
+// AppliedMigrations returns how many migrations the runner has recorded in
+// schema_migrations, or 0 if the table does not exist yet (nothing migrated).
+func AppliedMigrations(sqlDB *sql.DB) (int, error) {
+	var n int
+	err := sqlDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return n, nil
+}
+
 // SQLiteDSN builds a DSN for modernc.org/sqlite (driver name "sqlite")
 // with sane pragmas. Use ":memory:" for tests.
 func SQLiteDSN(path string) string {

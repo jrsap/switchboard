@@ -1,8 +1,8 @@
 // Package orgdb manages one organization's own database, written only by
 // that org's child process: providers, models, aliases, members,
 // permissions, quotas, API key hashes and the activity log. At this stage
-// org meta (the wrapped data key), members, providers and upstream models
-// exist; aliases, quotas, keys and the activity log come later.
+// org meta (the wrapped data key), members, providers, upstream models,
+// API keys and aliases exist; quotas and the activity log come later.
 //
 // Like globaldb, the driver is opened at the call site; this package
 // applies its own embedded migrations and runs the queries.
@@ -350,9 +350,14 @@ func (db *DB) ListProviders() ([]*Provider, error) {
 }
 
 // DeleteProvider removes a provider and, via ON DELETE CASCADE, its models.
+// A provider still referenced by an alias entry cannot be deleted
+// (ON DELETE RESTRICT on alias_entries); that surfaces as ErrConflict.
 func (db *DB) DeleteProvider(id int64) error {
 	res, err := db.sql.Exec(db.q.deleteProvider, id)
 	if err != nil {
+		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+			return fmt.Errorf("orgdb: provider id %d is still referenced by an alias entry: %w", id, ErrConflict)
+		}
 		return err
 	}
 	n, err := res.RowsAffected()
@@ -503,9 +508,228 @@ func (db *DB) listModels(query string, args ...any) ([]*Model, error) {
 	return models, rows.Err()
 }
 
-// DeleteModel removes one upstream model by provider and name.
+// DeleteModel removes one upstream model by provider and name. A model
+// still referenced by an alias entry cannot be deleted (ON DELETE RESTRICT
+// on alias_entries); that surfaces as ErrConflict.
 func (db *DB) DeleteModel(providerID int64, name string) error {
 	res, err := db.sql.Exec(db.q.deleteModel, providerID, name)
+	if err != nil {
+		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+			return fmt.Errorf("orgdb: model %q on provider %d is still referenced by an alias entry: %w", name, providerID, ErrConflict)
+		}
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AliasEntry is one entry of an alias's ordered failover list: an upstream
+// model of an upstream provider, referenced as "provider/model".
+type AliasEntry struct {
+	Position     int
+	ProviderID   int64
+	ProviderName string
+	ModelID      int64
+	ModelName    string
+}
+
+// String returns the entry in its "provider/model" form.
+func (e *AliasEntry) String() string {
+	return e.ProviderName + "/" + e.ModelName
+}
+
+// Alias is what the public API exposes as a model: a name mapped to an
+// ordered list of upstream provider/model entries, tried in order until
+// one succeeds (failover happens in the proxy, later).
+type Alias struct {
+	ID        int64
+	Name      string
+	Entries   []*AliasEntry
+	CreatedAt time.Time
+}
+
+// ParseAliasEntry splits an alias entry in "provider/model" form. The cut
+// is at the first "/" because provider names cannot contain "/" but model
+// names can.
+func ParseAliasEntry(entry string) (provider, model string, err error) {
+	provider, model, ok := strings.Cut(entry, "/")
+	if !ok || provider == "" || model == "" {
+		return "", "", fmt.Errorf("orgdb: invalid alias entry %q: want \"provider/model\"", entry)
+	}
+	return provider, model, nil
+}
+
+func (db *DB) scanAlias(row interface{ Scan(...any) error }) (*Alias, error) {
+	var a Alias
+	var createdAt int64
+	err := row.Scan(&a.ID, &a.Name, &createdAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	a.CreatedAt = time.Unix(0, createdAt).UTC()
+	return &a, nil
+}
+
+func (db *DB) scanAliasEntry(row interface{ Scan(...any) error }) (*AliasEntry, error) {
+	var e AliasEntry
+	err := row.Scan(&e.Position, &e.ProviderID, &e.ProviderName, &e.ModelID, &e.ModelName)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (db *DB) listEntries(aliasID int64) ([]*AliasEntry, error) {
+	rows, err := db.sql.Query(db.q.listAliasEntries, aliasID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []*AliasEntry
+	for rows.Next() {
+		e, err := db.scanAliasEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func (db *DB) withEntries(a *Alias) (*Alias, error) {
+	entries, err := db.listEntries(a.ID)
+	if err != nil {
+		return nil, err
+	}
+	a.Entries = entries
+	return a, nil
+}
+
+// AddAlias creates an alias mapping name to the ordered list of entries
+// ("provider/model" strings, order preserved as failover order). Every
+// entry must reference an existing provider and upstream model; duplicate
+// entries and an empty entry list are rejected. The alias and its entries
+// are inserted in one transaction.
+func (db *DB) AddAlias(name string, entries []string) (*Alias, error) {
+	if !modelNameRe.MatchString(name) {
+		return nil, fmt.Errorf("orgdb: invalid alias name %q: 1-128 chars of [a-zA-Z0-9_./:-], starting alphanumeric", name)
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("orgdb: alias needs at least one entry")
+	}
+	type resolved struct {
+		providerID, modelID int64
+	}
+	resolvedEntries := make([]resolved, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		providerName, modelName, err := ParseAliasEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		if seen[entry] {
+			return nil, fmt.Errorf("orgdb: duplicate alias entry %q", entry)
+		}
+		seen[entry] = true
+		p, err := db.GetProviderByName(providerName)
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("orgdb: alias entry %q: provider %q: %w", entry, providerName, ErrNotFound)
+		}
+		if err != nil {
+			return nil, err
+		}
+		m, err := db.GetModel(p.ID, modelName)
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("orgdb: alias entry %q: model %q on provider %q: %w", entry, modelName, providerName, ErrNotFound)
+		}
+		if err != nil {
+			return nil, err
+		}
+		resolvedEntries = append(resolvedEntries, resolved{p.ID, m.ID})
+	}
+
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(db.q.addAlias, name, time.Now().UnixNano())
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return nil, fmt.Errorf("orgdb: alias %q: %w", name, ErrConflict)
+		}
+		return nil, err
+	}
+	aliasID, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	for pos, e := range resolvedEntries {
+		if _, err := tx.Exec(db.q.addAliasEntry, aliasID, pos, e.providerID, e.modelID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return db.GetAliasByName(name)
+}
+
+func (db *DB) GetAliasByName(name string) (*Alias, error) {
+	a, err := db.scanAlias(db.sql.QueryRow(db.q.getAliasByName, name))
+	if err != nil {
+		return nil, err
+	}
+	return db.withEntries(a)
+}
+
+func (db *DB) GetAliasByID(id int64) (*Alias, error) {
+	a, err := db.scanAlias(db.sql.QueryRow(db.q.getAliasByID, id))
+	if err != nil {
+		return nil, err
+	}
+	return db.withEntries(a)
+}
+
+// ListAliases returns all aliases of the org ordered by name, each with its
+// entries in failover (position) order.
+func (db *DB) ListAliases() ([]*Alias, error) {
+	rows, err := db.sql.Query(db.q.listAliases)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var aliases []*Alias
+	for rows.Next() {
+		a, err := db.scanAlias(rows)
+		if err != nil {
+			return nil, err
+		}
+		aliases = append(aliases, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, a := range aliases {
+		if _, err := db.withEntries(a); err != nil {
+			return nil, err
+		}
+	}
+	return aliases, nil
+}
+
+// DeleteAlias removes an alias and, via ON DELETE CASCADE, its entries.
+func (db *DB) DeleteAlias(name string) error {
+	res, err := db.sql.Exec(db.q.deleteAlias, name)
 	if err != nil {
 		return err
 	}

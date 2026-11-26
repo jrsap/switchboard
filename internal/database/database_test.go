@@ -78,6 +78,24 @@ func TestMigrateRejectsBadFileNameAndBadSQL(t *testing.T) {
 	}
 }
 
+func TestAppliedMigrations(t *testing.T) {
+	sqlDB := openMem(t)
+	n, err := AppliedMigrations(sqlDB)
+	if err != nil || n != 0 {
+		t.Fatalf("before any migration: %d, %v; want 0, nil", n, err)
+	}
+	fsys := fstest.MapFS{
+		"migrations/0001_a.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE a (id INTEGER PRIMARY KEY);`)},
+		"migrations/0002_b.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE b (id INTEGER PRIMARY KEY);`)},
+	}
+	if err := Migrate(sqlDB, fsys, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err = AppliedMigrations(sqlDB); err != nil || n != 2 {
+		t.Fatalf("after migrate: %d, %v; want 2, nil", n, err)
+	}
+}
+
 func TestSQLiteDSN(t *testing.T) {
 	if got := SQLiteDSN(":memory:"); got != "file::memory:?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)" {
 		t.Fatalf("memory DSN = %q", got)
